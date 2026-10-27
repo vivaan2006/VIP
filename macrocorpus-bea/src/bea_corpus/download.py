@@ -1,57 +1,80 @@
-"""Sample download across ALL BEA datasets, plus a report on how heavy each one is.
+"""Download every BEA dataset's dictionary, plus every series in a sample of its tables.
 
-For each dataset in config/datasets.yaml:
-  1. catalog : list every table/indicator the dataset offers  -> data/catalog/<Dataset>.json
-  2. sample  : GetData on up to `max_calls` of them, spread across the list
-               raw responses                                  -> data/raw/<Dataset>/<table>.json
-  3. convert : standard JSON series (one line per series)     -> data/standardized/<Dataset>.jsonl
-  4. log     : bytes, seconds, rows, series per call          -> reports/download_log.csv
-               per-dataset totals + full-size estimate        -> reports/download_summary.md
+One command does all of it (`python -m bea_corpus download`, also the default command):
+
+  0. coverage   GetDataSetList: every BEA dataset must be in config/datasets.yaml
+  for each dataset:
+  1. dictionary GetParameterList + GetParameterValues for every parameter
+                -> data/corpus/<Dataset>/dictionary.json
+  2. sample     `sample_size` tables spread across the dataset's table list (or the ones in `tables`)
+  3. series     EVERY series in each sampled table: all lines, all years, all frequencies
+                -> data/corpus/<Dataset>/series/<table>.json   (standard JSON, one record per series)
+                raw BEA responses -> data/raw/<Dataset>/<table>.json
+  4. check      compare what came back with what the dictionary says the table contains
+  5. report     reports/coverage.md, reports/coverage.json, reports/issues.json
+
+Errors never stop the run. Each one is logged in reports/issues.json and the run moves on.
 """
 
 from __future__ import annotations
 
-import csv
 import json
-import re
-import time
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
 import yaml
 
 from .client import BEAClient, BEAError
-from .standardize_json import metadata_only, to_series
+from .common import as_list, desc_of, key_of, safe_name
+from .standardize_json import to_series
 
 DATA = Path("data")
+CORPUS = DATA / "corpus"
+RAW = DATA / "raw"
 REPORTS = Path("reports")
 
-LOG_FIELDS = ["dataset", "table", "status", "error", "kb", "seconds", "rows", "series", "from_cache"]
+NOT_A_DATASET = {"apidatasetmetadata"}  # listed by GetDataSetList but holds no data
+
+
+@dataclass
+class Issue:
+    dataset: str
+    table: str
+    level: str  # error = nothing usable came back, warning = data may be incomplete, info = worth knowing
+    issue: str
+
+
+@dataclass
+class TableResult:
+    table: str
+    description: str
+    requests: int = 0
+    requests_ok: int = 0
+    series: int = 0
+    observations: int = 0
+    empty_series: int = 0
+    mb: float = 0.0
+    check: str = "whole table in one call"
+    expected: int | None = None
+    missing: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DatasetResult:
+    dataset: str
+    table_param: str
+    tables_in_dataset: int = 0
+    dictionary_params: int = 0
+    dictionary_params_listed: int = 0
+    tables: list[TableResult] = field(default_factory=list)
+
+    @property
+    def series(self) -> int:
+        return sum(t.series for t in self.tables)
 
 
 # ---------- helpers ----------
-
-def _key(v) -> str:
-    if not isinstance(v, dict):
-        return str(v)
-    for k in ("Key", "TableName", "TableID", "TableNumber", "Code"):
-        if v.get(k) not in (None, ""):
-            return str(v[k])
-    return str(next(iter(v.values()), ""))
-
-
-def _as_list(x) -> list:
-    if x is None:
-        return []
-    return x if isinstance(x, list) else [x]
-
-
-def _desc(v: dict) -> str:
-    for k in ("Desc", "Description", "Descr"):
-        if v.get(k):
-            return str(v[k])
-    return ""
-
 
 def pick_evenly(items: list, n: int) -> list:
     """n items spread across the list (first, ..., last) so the sample covers the whole catalog."""
@@ -63,235 +86,332 @@ def pick_evenly(items: list, n: int) -> list:
     return [items[round(i * step)] for i in range(n)]
 
 
-def _safe_name(x: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", x)[:80] or "table"
-
-
-def regional_geo(table: str) -> list[str]:
-    """Which geography to ask for, by Regional table prefix (with fallbacks)."""
+def regional_geographies(table: str) -> list[str]:
+    """Geography to request for a Regional table, best first. Metro tables need MSA, port tables PORT."""
     t = table.upper()
-    if t.startswith(("MA", "MARPP")):
+    if t.startswith("MA"):
         return ["MSA", "STATE", "00000"]
     if t.startswith("PORT"):
         return ["PORT", "00000"]
     return ["STATE", "00000"]
 
 
-def fill_required(client: BEAClient, dataset: str, params: dict, split_by: str) -> dict:
-    """Add any required parameter we didn't set, using the dataset's 'all' value."""
+def _write_json(path: Path, obj, indent: int | None = 1) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=indent, ensure_ascii=False))
+
+
+def _fill_required(param_list: list[dict], params: dict, skip: set[str]) -> dict:
+    """Add every required parameter we didn't set, using the dataset's 'all' value."""
     out = dict(params)
-    try:
-        plist = client.get_parameter_list(dataset)
-    except BEAError:
-        return out
-    given = {k.lower() for k in out} | {split_by.lower()}
-    for p in plist:
-        name = p.get("ParameterName", "")
-        required = str(p.get("ParameterIsRequiredFlag")) == "1"
-        if required and name.lower() not in given and name.lower() not in ("userid", "method", "datasetname"):
+    given = {k.lower() for k in out} | {s.lower() for s in skip} | {"userid", "method", "datasetname"}
+    for p in param_list:
+        name = p.get("ParameterName", "").strip()
+        if str(p.get("ParameterIsRequiredFlag")) == "1" and name.lower() not in given:
             all_value = p.get("AllValue") or p.get("ParameterDefaultValue")
             if all_value:
                 out[name] = all_value
     return out
 
 
-# ---------- one dataset ----------
+# ---------- the pipeline ----------
 
-def catalog_dataset(client: BEAClient, dataset: str, split_by: str) -> list[dict]:
-    values = client.get_parameter_values(dataset, split_by)
-    items = [{"key": _key(v), "description": _desc(v) if isinstance(v, dict) else ""} for v in _as_list(values)]
-    params = []
-    try:
-        params = client.get_parameter_list(dataset)
-    except BEAError:
-        pass
-    out = DATA / "catalog" / f"{dataset}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"dataset": dataset, "split_by": split_by, "n_values": len(items),
-                               "parameters": params, "values": items}, indent=1))
-    return items
+class Downloader:
+    def __init__(self, client: BEAClient, config: dict, use_cache: bool = True):
+        self.client = client
+        self.defaults = config.get("defaults", {})
+        self.datasets: dict = config["datasets"]
+        self.use_cache = use_cache
+        self.issues: list[Issue] = []
 
+    def log(self, dataset: str, table: str, level: str, issue: str) -> None:
+        self.issues.append(Issue(dataset, table, level, issue))
 
-def download_dataset(client: BEAClient, dataset: str, cfg: dict, defaults: dict,
-                     use_cache: bool = True, log=print) -> dict:
-    split_by = cfg["split_by"]
-    max_calls = int(cfg.get("max_calls", defaults.get("max_calls", 15)))
-    target = int(cfg.get("target_series", defaults.get("target_series", 300)))
+    # 0. coverage
+    def check_dataset_coverage(self) -> None:
+        try:
+            listed = {d["DatasetName"] for d in self.client.get_dataset_list()}
+        except BEAError as exc:
+            self.log("ALL", "", "warning", f"Could not get BEA's dataset list to check coverage: {exc}")
+            return
+        configured = {name.lower() for name in self.datasets}
+        for name in sorted(listed):
+            if name.lower() not in configured | NOT_A_DATASET:
+                self.log(name, "", "error", "BEA dataset is not in config/datasets.yaml, so it is not downloaded.")
+        bea = {n.lower() for n in listed}
+        for name in self.datasets:
+            if name.lower() not in bea:
+                self.log(name, "", "warning", "In config/datasets.yaml but not in BEA's dataset list.")
 
-    summary = {"dataset": dataset, "catalog_size": 0, "calls": 0, "ok": 0, "failed": 0,
-               "kb": 0.0, "seconds": 0.0, "rows": 0, "series": 0, "errors": [], "log": []}
-    try:
-        catalog = catalog_dataset(client, dataset, split_by)
-    except BEAError as exc:
-        summary["errors"].append(f"catalog: {exc}")
-        log(f"  FAIL {dataset}: could not list {split_by}: {exc}")
-        return summary
-    summary["catalog_size"] = len(catalog)
-    base = fill_required(client, dataset, cfg.get("params", {}), split_by)
-
-    raw_dir = DATA / "raw" / dataset
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    std_path = DATA / "standardized" / f"{dataset}.jsonl"
-    std_path.parent.mkdir(parents=True, exist_ok=True)
-    index = []
-
-    with std_path.open("w") as std_out:
-        for item in pick_evenly(catalog, max_calls):
-            if summary["series"] >= target:
-                break
-            table = item["key"]
+    # 1. dictionary
+    def download_dictionary(self, dataset: str) -> tuple[list[dict], dict[str, list]]:
+        params = self.client.get_parameter_list(dataset)
+        values: dict[str, list] = {}
+        failed: dict[str, str] = {}
+        for p in params:
+            name = p.get("ParameterName", "").strip()
             try:
-                attempts = _attempts(client, dataset, split_by, table, base)
-            except Exception:
-                attempts = [{**base, split_by: table}]
-            row = {"dataset": dataset, "table": table, "status": "fail", "error": "", "kb": 0.0,
-                   "seconds": 0.0, "rows": 0, "series": 0, "from_cache": False}
-            for params in attempts:
-                summary["calls"] += 1
-                try:
-                    results = client.get_data(dataset, use_cache=use_cache, **params)
-                except (BEAError, Exception) as exc:  # network errors too: keep going
-                    row["error"] = str(exc)[:200]
-                    time.sleep(0 if client.last_from_cache else 1.0)  # stay well under 30 errors/min
-                    continue
-                records, stats = to_series(results, dataset, table, request=params)
-                (raw_dir / f"{_safe_name(table)}.json").write_text(
-                    json.dumps({"dataset": dataset, "request": params, "retrieved": date.today().isoformat(),
-                                "results": results}))
-                for rec in records:
-                    std_out.write(json.dumps(rec) + "\n")
-                    index.append(metadata_only(rec))
-                row.update(status="ok", error="", kb=round(client.last_bytes / 1024, 1),
-                           seconds=round(client.last_seconds, 2), rows=stats["rows"],
-                           series=stats["series"], from_cache=client.last_from_cache)
+                values[name] = as_list(self.client.get_parameter_values(dataset, name))
+            except BEAError as exc:
+                failed[name] = str(exc)
+        if failed:
+            self.log(dataset, "", "info", f"BEA can't list values for parameter(s) {', '.join(failed)} "
+                                          "on their own (they depend on the table).")
+        _write_json(CORPUS / dataset / "dictionary.json", {
+            "dataset": dataset, "retrieved": date.today().isoformat(), "parameters": params,
+            "values": values, "could_not_list": failed})
+        return params, values
+
+    # 2-4. one dataset
+    def download_dataset(self, dataset: str) -> DatasetResult:
+        cfg = self.datasets[dataset]
+        table_param = cfg["table_param"]
+        result = DatasetResult(dataset, table_param)
+        try:
+            param_list, values = self.download_dictionary(dataset)
+        except BEAError as exc:
+            self.log(dataset, "", "error", f"Could not get the parameter list: {exc}")
+            return result
+        result.dictionary_params = len(param_list)
+        result.dictionary_params_listed = len(values)
+
+        catalog = {key_of(v): desc_of(v) for v in values.get(table_param, [])}
+        result.tables_in_dataset = len(catalog)
+        if not catalog:
+            self.log(dataset, "", "error", f"The dictionary has no values for {table_param}, so no tables to sample.")
+            return result
+
+        chosen = [str(t) for t in cfg.get("tables", [])] or pick_evenly(
+            list(catalog), int(cfg.get("sample_size", self.defaults.get("sample_size", 5))))
+        for table in chosen:
+            if table not in catalog:
+                self.log(dataset, table, "warning", f"Chosen table is not in the dictionary's {table_param} list.")
+        base = _fill_required(param_list, cfg.get("params", {}), skip={table_param, "LineCode", "GeoFips"})
+
+        for table in chosen:
+            t = self.download_table(dataset, cfg, table, catalog.get(table, ""), {**base, table_param: table})
+            result.tables.append(t)
+            print(f"  {_status_word(t):<7} {table:<28} {t.series:>6} series  {t.requests_ok}/{t.requests} requests"
+                  f"  {t.mb:>7.2f} MB")
+        if result.tables and result.series == 0:
+            self.log(dataset, "", "error", "No series came back from any sampled table.")
+        return result
+
+    def download_table(self, dataset: str, cfg: dict, table: str, description: str, params: dict) -> TableResult:
+        t = TableResult(table, description)
+        if dataset == "Regional":
+            responses = self._regional_table(t, params)
+        else:
+            responses = [r for r in [self._get(dataset, t, params)] if r is not None]
+
+        records = []
+        for request, results in responses:
+            recs, stats = to_series(results, dataset, table, request=request)
+            records += recs
+            if stats.get("bad_time"):
+                self.log(dataset, table, "warning", f"{stats['bad_time']} rows had a time period we couldn't read.")
+        t.series = len(records)
+        t.observations = sum(r["n_obs"] for r in records)
+        t.empty_series = sum(1 for r in records if r["n_obs"] == 0)
+
+        if dataset != "Regional" and cfg.get("check"):
+            self._check_against_dictionary(dataset, cfg, table, t, responses)
+
+        if t.requests_ok and not records:
+            self.log(dataset, table, "warning", "BEA answered but the table had no data rows.")
+        if t.empty_series:
+            self.log(dataset, table, "info", f"{t.empty_series} of {t.series} series have no values at all "
+                                             "(every value suppressed or not available).")
+        if responses:
+            _write_json(RAW / dataset / f"{safe_name(table)}.json",
+                        {"dataset": dataset, "table": table, "responses": [
+                            {"request": req, "results": res} for req, res in responses]}, indent=None)
+            _write_json(CORPUS / dataset / "series" / f"{safe_name(table)}.json", {
+                "dataset": dataset, "table": table, "table_description": description,
+                "retrieved": date.today().isoformat(), "n_series": len(records), "series": records})
+        return t
+
+    def _get(self, dataset: str, t: TableResult, request: dict) -> tuple[dict, dict] | None:
+        """One GetData call. Returns (request, results), or None after logging the error."""
+        t.requests += 1
+        try:
+            results = self.client.get_data(dataset, use_cache=self.use_cache, **request)
+        except Exception as exc:  # API errors and network errors alike: log and move on
+            self.log(dataset, t.table, "error", f"GetData failed for {_short(request)}: {str(exc)[:200]}")
+            return None
+        t.requests_ok += 1
+        t.mb += self.client.last_bytes / (1024 * 1024)
+        return request, results
+
+    def _regional_table(self, t: TableResult, params: dict) -> list[tuple[dict, dict]]:
+        """Regional returns one line of a table per call, so ask for every line the dictionary lists."""
+        table = t.table
+        try:
+            lines = [key_of(v) for v in as_list(
+                self.client.get_parameter_values_filtered("Regional", "LineCode", TableName=table))]
+        except BEAError as exc:
+            self.log("Regional", table, "error", f"Could not list the table's lines: {exc}")
+            return []
+        lines = [ln for ln in dict.fromkeys(lines) if ln]
+        t.check, t.expected = "every line in the dictionary", len(lines)
+        if not lines:
+            self.log("Regional", table, "error", "The dictionary lists no lines for this table.")
+            return []
+
+        responses, geo = [], None
+        for candidate in regional_geographies(table):  # find the geography the table supports
+            first = self._get("Regional", t, {**params, "LineCode": lines[0], "GeoFips": candidate})
+            if first:
+                responses, geo = [first], candidate
                 break
-            summary["log"].append(row)
-            if row["status"] == "ok":
-                summary["ok"] += 1
-                summary["kb"] += row["kb"]
-                summary["seconds"] += row["seconds"]
-                summary["rows"] += row["rows"]
-                summary["series"] += row["series"]
-                log(f"  ok   {dataset:<24} {table:<14} {row['series']:>5} series {row['kb']:>9.1f} KB")
-            else:
-                summary["failed"] += 1
-                summary["errors"].append(f"{table}: {row['error']}")
-                log(f"  FAIL {dataset:<24} {table:<14} {row['error'][:90]}")
+        if geo is None:
+            t.missing = lines
+            self.log("Regional", table, "error", "No geography worked for this table's first line.")
+            return []
+        for line in lines[1:]:
+            got = self._get("Regional", t, {**params, "LineCode": line, "GeoFips": geo})
+            if got:
+                responses.append(got)
+        returned = {r["LineCode"] for r, res in responses if as_list(res.get("Data"))}
+        t.missing = [ln for ln in lines if ln not in returned]
+        if t.missing:
+            self.log("Regional", table, "warning", f"{len(t.missing)} of {len(lines)} lines returned no data "
+                                                   f"(e.g. {', '.join(t.missing[:5])}).")
+        return responses
 
-    (DATA / "standardized" / f"{dataset}.index.json").write_text(json.dumps(index, indent=1))
-    return summary
+    def _check_against_dictionary(self, dataset: str, cfg: dict, table: str, t: TableResult,
+                                  responses: list[tuple[dict, dict]]) -> None:
+        """Compare the values of `check` in the data with the dictionary's list for this table."""
+        dim = cfg["check"]
+        try:
+            listed = {key_of(v) for v in as_list(self.client.get_parameter_values_filtered(
+                dataset, dim, **{cfg["table_param"]: table}))}
+        except BEAError as exc:
+            self.log(dataset, table, "info", f"BEA can't list {dim} per table here ({str(exc)[:120]}); "
+                                             "checked as a whole-table call instead.")
+            return
+        found = {str(row.get(dim, "")).strip() for _, res in responses for row in as_list(res.get("Data"))}
+        t.check, t.expected = f"every {dim} in the dictionary", len(listed)
+        t.missing = sorted(listed - found)
+        if t.missing:
+            self.log(dataset, table, "warning", f"{len(t.missing)} of {len(listed)} {dim} values in the dictionary "
+                                                f"have no data (e.g. {', '.join(t.missing[:5])}).")
 
-
-def _attempts(client, dataset, split_by, table, base) -> list[dict]:
-    """Parameter sets to try for one table (more than one only for Regional fallbacks)."""
-    params = {**base, split_by: table}
-    if dataset != "Regional":
-        return [params]
-    line = "1"
-    try:
-        lines = _as_list(client.get_parameter_values_filtered(dataset, "LineCode", TableName=table))
-        if lines and _key(lines[0]):
-            line = _key(lines[0])
-    except Exception:  # odd/empty answer: fall back to line 1, the GetData call will say if that's wrong
-        pass
-    return [{**params, "LineCode": line, "GeoFips": geo} for geo in regional_geo(table)]
-
-
-# ---------- all datasets + report ----------
-
-def run(config_path: str | Path = "config/datasets.yaml", only: list[str] | None = None,
-        max_calls: int | None = None, target_series: int | None = None, use_cache: bool = True,
-        client: BEAClient | None = None) -> list[dict]:
-    cfg = yaml.safe_load(Path(config_path).read_text())
-    defaults = dict(cfg.get("defaults", {}))
-    if max_calls:
-        defaults["max_calls"] = max_calls
-    if target_series:
-        defaults["target_series"] = target_series
-    datasets = cfg["datasets"]
-    if only:
-        datasets = {k: v for k, v in datasets.items() if k in only}
-    if max_calls:  # a CLI override beats per-dataset settings
-        datasets = {k: {**v, "max_calls": min(int(v.get("max_calls", max_calls)), max_calls)}
-                    for k, v in datasets.items()}
-
-    client = client or BEAClient()
-    summaries = []
-    for name, dcfg in datasets.items():
-        print(f"\n== {name}")
-        summaries.append(download_dataset(client, name, dcfg, defaults, use_cache=use_cache))
-    write_reports(summaries)
-    return summaries
+    # all datasets
+    def run(self, only: list[str] | None = None) -> list[DatasetResult]:
+        if not only:
+            self.check_dataset_coverage()
+        results = []
+        for name in self.datasets:
+            if only and name not in only:
+                continue
+            print(f"\n== {name}")
+            results.append(self.download_dataset(name))
+        write_reports(results, self.issues)
+        return results
 
 
-def write_reports(summaries: list[dict]) -> None:
+def _short(request: dict) -> str:
+    keep = {k: v for k, v in request.items() if str(v).upper() not in ("ALL", "X")}
+    return ", ".join(f"{k}={v}" for k, v in keep.items()) or "all"
+
+
+def _status_word(t: TableResult) -> str:
+    if not t.requests_ok:
+        return "FAIL"
+    return "partial" if t.missing or t.requests_ok < t.requests else "ok"
+
+
+def dataset_status(d: DatasetResult, issues: list[Issue]) -> str:
+    levels = {i.level for i in issues if i.dataset == d.dataset}
+    if d.series == 0:
+        return "failed"
+    return "issues" if levels & {"error", "warning"} else "ok"
+
+
+# ---------- reports ----------
+
+def write_reports(results: list[DatasetResult], issues: list[Issue]) -> None:
     REPORTS.mkdir(exist_ok=True)
-    with (REPORTS / "download_log.csv").open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=LOG_FIELDS)
-        w.writeheader()
-        for s in summaries:
-            for row in s["log"]:
-                w.writerow(row)
+    summary = [{**{k: v for k, v in asdict(d).items() if k != "tables"},
+                "status": dataset_status(d, issues), "series": d.series,
+                "tables": [asdict(t) for t in d.tables]} for d in results]
+    _write_json(REPORTS / "coverage.json", {"run": date.today().isoformat(), "datasets": summary}, indent=2)
+    _write_json(REPORTS / "issues.json", [asdict(i) for i in issues], indent=2)
 
     lines = [
-        "# BEA sample download: how heavy is each dataset?",
+        "# BEA coverage check",
         "",
-        f"Run on {date.today().isoformat()}. One GetData call per table; numbers are for the sample only.",
-        "`Est. full size` = average KB per call x number of tables in the dataset (rough; Regional is",
-        "much bigger in reality because every table also has many lines and geographies).",
+        f"Run on {date.today().isoformat()}. For each dataset: the full dictionary, then every series in a sample "
+        "of its tables. `Checked` says how we know a table is complete: either we compared it with the "
+        "dictionary's list, or BEA returns the whole table in one call.",
         "",
-        "| Dataset | Tables in catalog | Calls OK / tried | Series | Rows | Raw MB | Avg s/call | Est. full size (MB) |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Dataset | Status | Dictionary params listed | Tables in dataset | Sampled | Requests ok | Series | "
+        "Observations | MB |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
-    tot = {"series": 0, "rows": 0, "kb": 0.0, "full": 0.0}
-    for s in summaries:
-        avg_kb = s["kb"] / s["ok"] if s["ok"] else 0
-        full_mb = avg_kb * s["catalog_size"] / 1024
-        avg_s = s["seconds"] / s["ok"] if s["ok"] else 0
-        tried = s["ok"] + s["failed"]
-        lines.append(f"| {s['dataset']} | {s['catalog_size']} | {s['ok']} / {tried} | {s['series']} | "
-                     f"{s['rows']} | {s['kb'] / 1024:.2f} | {avg_s:.2f} | {full_mb:.0f} |")
-        tot["series"] += s["series"]
-        tot["rows"] += s["rows"]
-        tot["kb"] += s["kb"]
-        tot["full"] += full_mb
-    lines.append(f"| **Total** | | | **{tot['series']}** | **{tot['rows']}** | **{tot['kb'] / 1024:.2f}** | | "
-                 f"**{tot['full']:.0f}** |")
-    errs = [(s["dataset"], e) for s in summaries for e in s["errors"]]
-    if errs:
-        lines += ["", "## Errors", ""] + [f"- **{d}** {e}" for d, e in errs[:60]]
-    (REPORTS / "download_summary.md").write_text("\n".join(lines) + "\n")
-    print("\n" + "\n".join(lines[7:]))
-    print(f"\nWrote reports/download_summary.md, reports/download_log.csv, data/standardized/*.jsonl")
+    for d in results:
+        ok = sum(t.requests_ok for t in d.tables)
+        req = sum(t.requests for t in d.tables)
+        obs = sum(t.observations for t in d.tables)
+        mb = sum(t.mb for t in d.tables)
+        lines.append(f"| {d.dataset} | {dataset_status(d, issues)} | {d.dictionary_params_listed}/"
+                     f"{d.dictionary_params} | {d.tables_in_dataset} | {len(d.tables)} | {ok}/{req} | "
+                     f"{d.series} | {obs} | {mb:.1f} |")
+    total = sum(d.series for d in results)
+    lines += ["", f"**{total} series** downloaded in total.", "", "## Sampled tables", "",
+              "| Dataset | Table | Series | Requests ok | Checked | Missing |", "|---|---|---|---|---|---|"]
+    for d in results:
+        for t in d.tables:
+            missing = f"{len(t.missing)} of {t.expected}" if t.expected is not None else "-"
+            lines.append(f"| {d.dataset} | {t.table} | {t.series} | {t.requests_ok}/{t.requests} | {t.check} | "
+                         f"{missing} |")
+    lines += ["", "## Issues", ""]
+    order = {"error": 0, "warning": 1, "info": 2}
+    lines += [f"- **{i.level}** {i.dataset}{' / ' + i.table if i.table else ''}: {i.issue}"
+              for i in sorted(issues, key=lambda i: (order[i.level], i.dataset))] or ["None."]
+    (REPORTS / "coverage.md").write_text("\n".join(lines) + "\n")
+
+    print("\n" + "\n".join(lines[4:4 + len(results) + 2]))
+    counts = {lvl: sum(1 for i in issues if i.level == lvl) for lvl in order}
+    print(f"\n{total} series. Issues: {counts['error']} errors, {counts['warning']} warnings, {counts['info']} info.")
+    print("Wrote data/corpus/, reports/coverage.md, reports/coverage.json, reports/issues.json")
+
+
+# ---------- entry points ----------
+
+def run(config_path: str | Path = "config/datasets.yaml", only: list[str] | None = None,
+        sample_size: int | None = None, use_cache: bool = True,
+        client: BEAClient | None = None) -> list[DatasetResult]:
+    config = yaml.safe_load(Path(config_path).read_text())
+    if sample_size:
+        config.setdefault("defaults", {})["sample_size"] = sample_size
+        for cfg in config["datasets"].values():
+            cfg.pop("sample_size", None)
+    return Downloader(client or BEAClient(), config, use_cache=use_cache).run(only)
 
 
 def restandardize() -> dict:
-    """Rebuild data/standardized/ from the raw files already on disk (no API calls).
+    """Rebuild data/corpus/*/series/ from the raw responses on disk (no API calls).
 
     Handy when we change the JSON format: edit standardize_json.py, run this, done.
     """
-    counts = {}
-    out_dir = DATA / "standardized"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    raw_root = DATA / "raw"
-    if not raw_root.exists():
+    if not RAW.exists():
         raise SystemExit("No data/raw/ yet. Run `python -m bea_corpus download` first.")
-    for ds_dir in sorted(p for p in raw_root.iterdir() if p.is_dir() and p.name != "cache"):
-        index, n = [], 0
-        with (out_dir / f"{ds_dir.name}.jsonl").open("w") as f:
-            for raw in sorted(ds_dir.glob("*.json")):
-                blob = json.loads(raw.read_text())
-                req = blob.get("request", {})
-                split_value = next((v for k, v in req.items() if k in SPLIT_PARAMS), raw.stem)
-                records, _ = to_series(blob["results"], ds_dir.name, str(split_value), request=req)
-                for rec in records:
-                    f.write(json.dumps(rec) + "\n")
-                    index.append(metadata_only(rec))
-                n += len(records)
-        (out_dir / f"{ds_dir.name}.index.json").write_text(json.dumps(index, indent=1))
+    counts = {}
+    for ds_dir in sorted(p for p in RAW.iterdir() if p.is_dir() and p.name != "cache"):
+        n = 0
+        for raw in sorted(ds_dir.glob("*.json")):
+            blob = json.loads(raw.read_text())
+            if "responses" not in blob:  # left over from the old layout
+                continue
+            records = [rec for r in blob["responses"]
+                       for rec in to_series(r["results"], blob["dataset"], blob["table"], request=r["request"])[0]]
+            out = CORPUS / blob["dataset"] / "series" / raw.name
+            old = json.loads(out.read_text()) if out.exists() else {}
+            _write_json(out, {**old, "dataset": blob["dataset"], "table": blob["table"],
+                              "n_series": len(records), "series": records})
+            n += len(records)
         counts[ds_dir.name] = n
         print(f"  {ds_dir.name:<26} {n:>6} series")
     return counts
-
-
-SPLIT_PARAMS = ("TableName", "TableID", "Indicator", "TypeOfInvestment", "TypeOfService", "Channel", "SeriesID")

@@ -2,8 +2,9 @@
 
 - One endpoint, five methods (GetDataSetList, GetParameterList,
   GetParameterValues, GetParameterValuesFiltered, GetData).
-- Stays under BEA's limits (100 requests/min, 100 MB/min, 30 errors/min)
-  by spacing requests and backing off on HTTP 429 using Retry-After.
+- Stays under BEA's limits (100 requests/min, 100 MB/min, 30 errors/min):
+  spaces requests, pauses when the last minute's downloads near 100 MB,
+  pauses after each API error, and backs off on HTTP 429 using Retry-After.
 - Caches raw JSON responses on disk so re-runs don't re-download.
 """
 
@@ -13,12 +14,14 @@ import hashlib
 import json
 import os
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 import requests
 
 BASE_URL = "https://apps.bea.gov/api/data"
+MB = 1024 * 1024
 
 
 class BEAError(RuntimeError):
@@ -32,7 +35,9 @@ class BEAClient:
         cache_dir: str | Path | None = "data/raw/cache",
         min_interval: float = 0.75,  # ~80 requests/min, under the 100/min limit
         max_retries: int = 3,
-        timeout: float = 60.0,
+        timeout: float = 180.0,  # big tables (InputOutput, ~40 MB) take a while to prepare
+        max_mb_per_minute: float = 80.0,  # BEA's limit is 100
+        error_pause: float = 2.5,  # seconds after an API error, keeps us under 30 errors/min
     ) -> None:
         self.api_key = api_key or os.environ.get("BEA_API_KEY")
         if not self.api_key:
@@ -46,7 +51,10 @@ class BEAClient:
         self.min_interval = min_interval
         self.max_retries = max_retries
         self.timeout = timeout
+        self.max_bytes_per_minute = max_mb_per_minute * MB
+        self.error_pause = error_pause
         self._last_request = 0.0
+        self._recent: deque[tuple[float, int]] = deque()  # (time, bytes) of downloads in the last minute
         self._session = requests.Session()
         # Stats about the most recent call, used by the download report.
         self.last_bytes = 0
@@ -92,7 +100,11 @@ class BEAClient:
             # response. Drop it so the key never lands in cache files.
             if isinstance(payload.get("BEAAPI"), dict):
                 payload["BEAAPI"].pop("Request", None)
-            results = extract_results(payload)  # raises on API errors, so errors are never cached
+            try:
+                results = extract_results(payload)  # raises on API errors, so errors are never cached
+            except BEAError:
+                time.sleep(self.error_pause)
+                raise
             if cache_file:
                 cache_file.write_text(json.dumps(payload))
             return results
@@ -104,11 +116,13 @@ class BEAClient:
             wait = self.min_interval - (time.monotonic() - self._last_request)
             if wait > 0:
                 time.sleep(wait)
+            self._respect_data_limit()
             self._last_request = time.monotonic()
             started = time.monotonic()
             resp = self._session.get(BASE_URL, params=params, timeout=self.timeout)
             self.last_seconds = time.monotonic() - started
             self.last_bytes = len(resp.content)
+            self._recent.append((time.monotonic(), self.last_bytes))
             if resp.status_code == 429 and attempt < self.max_retries:
                 time.sleep(float(resp.headers.get("Retry-After", 60)) + 1)
                 continue
@@ -120,6 +134,16 @@ class BEAClient:
                 text = resp.content.decode("iso-8859-1")
             return json.loads(text)
         raise BEAError("Gave up after repeated throttling (HTTP 429).")
+
+    def _respect_data_limit(self) -> None:
+        """Wait until the bytes downloaded in the last 60 s are under the per-minute budget."""
+        while True:
+            now = time.monotonic()
+            while self._recent and now - self._recent[0][0] > 60:
+                self._recent.popleft()
+            if sum(b for _, b in self._recent) < self.max_bytes_per_minute:
+                return
+            time.sleep(61 - (now - self._recent[0][0]))
 
     def _cache_path(self, query: dict) -> Path | None:
         if not self.cache_dir:

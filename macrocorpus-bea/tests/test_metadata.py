@@ -63,7 +63,7 @@ def test_metadata_run(tmp_path, monkeypatch):
     (tmp_path / "config" / "metadata_groups.yaml").write_text((ROOT / "config" / "metadata_groups.yaml").read_text())
     monkeypatch.chdir(tmp_path)
 
-    out = M.run(client=BEAClient(cache_dir=None, min_interval=0))["datasets"]
+    out = M.run(client=BEAClient(cache_dir=None, min_interval=0, error_pause=0))["datasets"]
 
     fa = out["FixedAssets"]
     assert fa["checks"]["canonical_id_status"] == "unique_in_sample"

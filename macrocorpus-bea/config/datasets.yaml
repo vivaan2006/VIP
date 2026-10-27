@@ -1,68 +1,75 @@
-# How to pull a sample from each of the 12 BEA API datasets.
+# What `python -m bea_corpus download` pulls from each of BEA's 12 datasets.
 #
-# Every BEA dataset is split into "tables" (or indicators, investment types...).
-# For each dataset we:
-#   1. ask the API for the full list of values of `split_by`  (that list = everything we could scrape)
-#   2. pick `max_calls` of them spread across the list
-#   3. call GetData once per pick, with `params` added on top
-#   4. stop early once we have `target_series` series for that dataset
+# For every dataset it saves the full dictionary (every parameter and all its values),
+# then picks `sample_size` tables spread across the dataset's table list and downloads
+# EVERY series in each of them.
 #
-# Any required parameter not listed here is filled automatically with the
-# dataset's "all" value (from GetParameterList), so the config stays short.
-# Parameter names/values come from the BEA API User Guide appendices.
+#   table_param  the parameter that names a table in this dataset
+#   params       the rest of the GetData request. ALL = every year / frequency / country,
+#                so one call returns the whole table. Required parameters left out here
+#                are filled with the dataset's "all" value automatically.
+#   tables       optional: these tables instead of an evenly spread sample
+#   check        optional: a dimension to compare against the dictionary's list for each table
+#                (GetParameterValuesFiltered), so missing series show up in reports/issues.json
+#
+# Regional is special: BEA returns one line of a Regional table per call, so the
+# downloader asks the dictionary for every line of the table and requests each one.
 
 defaults:
-  max_calls: 15          # GetData calls per dataset (BEA allows 100/min)
-  target_series: 300     # "a few hundred" series per dataset is enough to prove the code works
+  sample_size: 5
 
 datasets:
   NIPA:                      # headline national accounts (GDP, income, PCE prices)
-    split_by: TableName
+    table_param: TableName
     params: {Frequency: "A,Q,M", Year: ALL}
 
   NIUnderlyingDetail:        # finer detail behind NIPA tables
-    split_by: TableName
+    table_param: TableName
     params: {Frequency: "A,Q,M", Year: ALL}
 
   FixedAssets:               # capital stock, depreciation (annual only)
-    split_by: TableName
+    table_param: TableName
     params: {Year: ALL}
 
   GDPbyIndustry:             # value added by industry
-    split_by: TableID
+    table_param: TableID
     params: {Frequency: "A,Q", Year: ALL, Industry: ALL}
+    check: Industry
 
   UnderlyingGDPbyIndustry:   # finer industry detail (annual only)
-    split_by: TableID
+    table_param: TableID
     params: {Frequency: A, Year: ALL, Industry: ALL}
+    check: Industry
 
-  InputOutput:               # industry-by-industry matrices; each table is big, so fewer calls
-    split_by: TableID
+  InputOutput:               # industry-by-industry matrices, ~40 MB per table, so a smaller sample
+    table_param: TableID
     params: {Year: ALL}
-    max_calls: 4
+    sample_size: 2
 
-  ITA:                       # balance of payments, U.S. total vs all countries
-    split_by: Indicator
-    params: {AreaOrCountry: AllCountries, Frequency: ALL, Year: ALL}
+  ITA:                       # balance of payments: one indicator, every country, every frequency
+    table_param: Indicator
+    params: {AreaOrCountry: ALL, Frequency: ALL, Year: ALL}
+    check: AreaOrCountry
 
-  IIP:                       # international investment position (one type per call is required)
-    split_by: TypeOfInvestment
+  IIP:                       # international investment position: one type, every component and frequency
+    table_param: TypeOfInvestment
     params: {Component: ALL, Frequency: ALL, Year: ALL}
 
-  IntlServTrade:             # services trade by service type
-    split_by: TypeOfService
-    params: {TradeDirection: ALL, Affiliation: ALL, AreaOrCountry: AllCountries, Year: ALL}
+  IntlServTrade:             # services trade: one service type, every direction, affiliation, country
+    table_param: TypeOfService
+    params: {TradeDirection: ALL, Affiliation: ALL, AreaOrCountry: ALL, Year: ALL}
+    check: AreaOrCountry
 
-  IntlServSTA:               # services supplied through foreign affiliates
-    split_by: Channel
-    params: {AreaOrCountry: AllCountries, Year: ALL}
+  IntlServSTA:               # services through affiliates: one channel, every industry and destination.
+    table_param: Channel     # All-countries level: adding countries multiplies a ~1,000-series table.
+    params: {Destination: ALL, Industry: ALL, AreaOrCountry: AllCountries, Year: ALL}
 
-  MNE:                       # direct investment by country (DI side; AMNE needs extra flags)
-    split_by: SeriesID
+  MNE:                       # direct investment abroad by country. These series IDs are the
+    table_param: SeriesID    # direct-investment ones that work with Outward + Country.
     params: {DirectionOfInvestment: Outward, Classification: Country, Country: all, Year: ALL}
+    tables: ["30", "31", "27", "25", "33"]
 
-  Regional:                  # states, counties, metros. Each call = one table + one line + a geography
-    split_by: TableName
+  Regional:                  # states and metros: every line of each sampled table (see above)
+    table_param: TableName
     params: {Year: ALL}
-    # LineCode and GeoFips are picked per table by the downloader:
-    # first line of the table, and STATE / MSA depending on the table prefix.
+    sample_size: 3

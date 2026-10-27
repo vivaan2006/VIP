@@ -6,8 +6,8 @@
     python -m bea_corpus fetch                       # download + standardize config/series.yaml
     python -m bea_corpus profile                     # statistical profile of the corpus
 
-  This week's commands (sample of ALL 12 datasets, standard JSON):
-    python -m bea_corpus download                    # catalog + sample + JSON + size report
+  Main corpus download (all 12 datasets, standard JSON):
+    python -m bea_corpus                             # = download: dictionaries + all series in sampled tables
     python -m bea_corpus download --only NIPA ITA    # just some datasets
     python -m bea_corpus standardize                 # rebuild JSON from raw files, no API calls
 """
@@ -103,8 +103,8 @@ def cmd_profile(args) -> None:
 
 def cmd_download(args) -> None:
     from .download import run
-    run(args.config, only=args.only, max_calls=args.max_calls, target_series=args.target_series,
-        use_cache=not args.refresh, client=BEAClient(cache_dir="data/raw/cache"))
+    run(args.config, only=args.only, sample_size=args.sample_size, use_cache=not args.refresh,
+        client=BEAClient(cache_dir="data/raw/cache"))
 
 
 def cmd_standardize(args) -> None:
@@ -138,15 +138,14 @@ def main(argv=None) -> None:
 
     sub.add_parser("profile", help="profile the fetched corpus").set_defaults(func=cmd_profile)
 
-    pd_ = sub.add_parser("download", help="sample-download every BEA dataset to standard JSON")
+    pd_ = sub.add_parser("download", help="(default) every dataset's dictionary + all series in sampled tables")
     pd_.add_argument("--config", default="config/datasets.yaml")
     pd_.add_argument("--only", nargs="+", help="dataset names, e.g. NIPA Regional")
-    pd_.add_argument("--max-calls", type=int, help="GetData calls per dataset (default from config)")
-    pd_.add_argument("--target-series", type=int, help="stop a dataset after this many series")
+    pd_.add_argument("--sample-size", type=int, help="tables per dataset (overrides the config)")
     pd_.add_argument("--refresh", action="store_true", help="ignore cached responses")
     pd_.set_defaults(func=cmd_download)
 
-    sub.add_parser("standardize", help="rebuild data/standardized from data/raw (offline)"
+    sub.add_parser("standardize", help="rebuild data/corpus series JSON from data/raw (offline)"
                    ).set_defaults(func=cmd_standardize)
 
     pm = sub.add_parser("metadata", help="metadata + sample series for the groups in config/metadata_groups.yaml")
@@ -155,7 +154,8 @@ def main(argv=None) -> None:
     pm.add_argument("--refresh", action="store_true", help="ignore cached responses")
     pm.set_defaults(func=cmd_metadata)
 
-    args = p.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    args = p.parse_args(argv or ["download"])  # no command = the full download
     args.func(args)
 
 

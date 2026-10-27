@@ -14,7 +14,6 @@ Files go to data/BEA/<Dataset>/, same layout as the reference NIPA/Regional/GDPb
 
 from __future__ import annotations
 
-import html
 import json
 import re
 from collections import defaultdict
@@ -24,6 +23,7 @@ from pathlib import Path
 import yaml
 
 from .client import BEAClient, BEAError
+from .common import as_list, clean_text, desc_of, key_of
 from .standardize_json import parse_number, parse_time
 
 OUT = Path("data/BEA")
@@ -32,54 +32,9 @@ SOURCE_ID_FIELDS = ["TimeSeriesId", "SeriesCode"]
 DESCRIPTION_FIELDS = ["TimeSeriesDescription", "LineDescription", "IndustrYDescription",
                       "IndustryDescription", "SeriesName", "Description", "Row"]
 _BRACKET = re.compile(r"\[([^\]]+)\]")
-_TAGS = re.compile(r"<[^>]+>")
 
 
 # ---------- small helpers ----------
-
-def _as_list(x) -> list:
-    if x is None:
-        return []
-    return x if isinstance(x, list) else [x]
-
-
-def _lower(v: dict) -> dict:
-    return {str(k).strip().lower(): x for k, x in v.items()}
-
-
-def _key(v) -> str:
-    if not isinstance(v, dict):
-        return str(v).strip()
-    lv = _lower(v)
-    for k in ("key", "tablename", "tableid", "code"):
-        if lv.get(k) not in (None, ""):
-            return str(lv[k]).strip()
-    return str(next(iter(v.values()), "")).strip()
-
-
-def _desc(v) -> str:
-    if not isinstance(v, dict):
-        return ""
-    lv = _lower(v)
-    for k in ("desc", "description", "value"):
-        if lv.get(k):
-            return _clean(lv[k])
-    return ""
-
-
-def _fix_mojibake(text: str) -> str:
-    """UTF-8 text that was read as Latin-1 (e.g. 'â\x80\x99' for an apostrophe), from older cached files."""
-    if "\u00e2\u0080" in text or "\u00c3" in text:
-        try:
-            return text.encode("latin-1").decode("utf-8")
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            pass
-    return text
-
-
-def _clean(text) -> str:
-    return " ".join(html.unescape(_TAGS.sub("", _fix_mojibake(str(text)))).split())
-
 
 def _write(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,11 +50,11 @@ def _snake(name: str) -> str:
 
 
 def catalog_stats(values: list) -> dict:
-    keys = [_key(v) for v in values]
+    keys = [key_of(v) for v in values]
     nonempty = [k for k in keys if k]
     dupes = sorted({k for k in nonempty if nonempty.count(k) > 1})
     return {"values": len(values), "unique_keys": len(set(nonempty)),
-            "duplicate_keys": dupes, "with_description": sum(1 for v in values if _desc(v))}
+            "duplicate_keys": dupes, "with_description": sum(1 for v in values if desc_of(v))}
 
 
 # ---------- the core: works on any GetData result ----------
@@ -110,9 +65,9 @@ def build_series(dataset: str, results: dict, request: dict, cfg: dict,
 
     Returns (series_metadata, tagged_observations, checks).
     """
-    rows = _as_list(results.get("Data"))
-    notes = {str(n.get("NoteRef", "")).strip().upper(): _clean(n.get("NoteText", ""))
-             for n in _as_list(results.get("Notes")) if isinstance(n, dict)}
+    rows = as_list(results.get("Data"))
+    notes = {str(n.get("NoteRef", "")).strip().upper(): clean_text(n.get("NoteText", ""))
+             for n in as_list(results.get("Notes")) if isinstance(n, dict)}
     id_fields = cfg["series_id"]
     labels = {f: _label_index(catalogs.get(param, [])) for f, param in (cfg.get("labels") or {}).items()}
     req_ci = {k.strip().lower(): v for k, v in request.items()}
@@ -135,7 +90,7 @@ def build_series(dataset: str, results: dict, request: dict, cfg: dict,
         value, code = parse_number(raw_value)
         repeat = date in values_at[sid]
         values_at[sid][date].add(str(raw_value).replace(",", "").strip())
-        labels_at[sid][date].add(_clean(r.get("LineDescription") or r.get("Row") or r.get("TimeSeriesDescription")
+        labels_at[sid][date].add(clean_text(r.get("LineDescription") or r.get("Row") or r.get("TimeSeriesDescription")
                                         or r.get("IndustrYDescription") or "") + f" (line {r.get('LineNumber')})"
                                  * bool(r.get("LineNumber")))
         refs = [x.strip().upper() for x in str(r.get("NoteRef", "")).split(",") if x.strip()]
@@ -216,7 +171,7 @@ def _label_index(values: list) -> dict[str, list[str]]:
     """
     out: dict[str, list[str]] = defaultdict(list)
     for v in values:
-        k, d = _key(v), _desc(v)
+        k, d = key_of(v), desc_of(v)
         if d and d not in out[k]:
             out[k].append(d)
     return dict(out)
@@ -233,9 +188,9 @@ def _classification(index: dict[str, list[str]], code: str) -> dict:
 def _describe(r: dict) -> str:
     """Series description. MNE rows only carry the table title in SeriesName, which is the
     same for every series, so add the row/column labels to make it series specific."""
-    base = next((_clean(r[f]) for f in DESCRIPTION_FIELDS if r.get(f)), "")
-    if r.get("SeriesName") and base == _clean(r["SeriesName"]):
-        extra = [_clean(r[f]) for f in ("Row", "ColumnGParent", "ColumnParent", "Column")
+    base = next((clean_text(r[f]) for f in DESCRIPTION_FIELDS if r.get(f)), "")
+    if r.get("SeriesName") and base == clean_text(r["SeriesName"]):
+        extra = [clean_text(r[f]) for f in ("Row", "ColumnGParent", "ColumnParent", "Column")
                  if r.get(f) and str(r[f]).strip() not in ("", "None")]
         base = "; ".join([base, *extra])
     return base
@@ -318,7 +273,7 @@ def extract_group(client: BEAClient, dataset: str, cfg: dict) -> dict:
         summary["errors"].append(f"parameters: {exc}")
     _write(folder / f"{prefix}_parameters.json", params)
     summary["api_parameters"] = [p.get("ParameterName", "").strip() for p in params]
-    summary["parameter_descriptions"] = {p.get("ParameterName", "").strip(): _clean(p.get("ParameterDescription", ""))
+    summary["parameter_descriptions"] = {p.get("ParameterName", "").strip(): clean_text(p.get("ParameterDescription", ""))
                                          for p in params}
     summary["required_parameters"] = [p.get("ParameterName", "").strip() for p in params
                                       if str(p.get("ParameterIsRequiredFlag")) == "1"]
@@ -326,7 +281,7 @@ def extract_group(client: BEAClient, dataset: str, cfg: dict) -> dict:
     catalogs, cat_stats = {}, {}
     for param in cfg.get("classifications", []):
         try:
-            values = _as_list(client.get_parameter_values(dataset, param))
+            values = as_list(client.get_parameter_values(dataset, param))
         except BEAError as exc:
             summary["errors"].append(f"{param}: {exc}")
             continue
@@ -342,11 +297,11 @@ def extract_group(client: BEAClient, dataset: str, cfg: dict) -> dict:
         summary["errors"].append(f"sample: {exc}")
         return summary
 
-    rows = _as_list(results.get("Data"))
+    rows = as_list(results.get("Data"))
     series, tagged, checks = build_series(dataset, results, request, cfg, catalogs)
-    dims = _as_list(results.get("Dimensions"))
+    dims = as_list(results.get("Dimensions"))
     sample = {"dataset": dataset, **{_snake(k): v for k, v in request.items()},
-              "dimensions": dims, "notes": _as_list(results.get("Notes")), "observations": tagged}
+              "dimensions": dims, "notes": as_list(results.get("Notes")), "observations": tagged}
     _write(folder / f"{prefix}_sample.json", sample)
     _write(folder / f"{prefix}_series_metadata.json", series)
 
@@ -364,7 +319,7 @@ def extract_group(client: BEAClient, dataset: str, cfg: dict) -> dict:
         "source_series_id_field": next((f for f in SOURCE_ID_FIELDS if rows and f in rows[0]), None),
         "unit_fields": sorted({s["unit_source"] for s in series}),
         "frequencies": sorted({s["frequency"] for s in series}),
-        "notes_count": len(_as_list(results.get("Notes"))),
+        "notes_count": len(as_list(results.get("Notes"))),
         "canonical_id_status": ("verified_unique_in_sample" if checks["canonical_id_status"] == "unique_in_sample"
                                 else "not_unique_in_sample"),
         "checks": checks,
