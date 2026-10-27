@@ -24,7 +24,7 @@ python -m bea_corpus datasets               # list BEA datasets
 python -m bea_corpus params NIPA            # a dataset's parameters
 python -m bea_corpus params NIPA TableName  # every NIPA table
 python -m bea_corpus fetch --only us_pce_price_index --refresh
-python -m bea_corpus download              # sample of all 12 BEA datasets -> data/standardized/*.jsonl
+python -m bea_corpus download              # every dataset's dictionary + all series in sampled tables -> data/corpus/
 python -m bea_corpus standardize           # rebuild the JSON from saved raw files
 ```
 

@@ -35,6 +35,7 @@ RAW = DATA / "raw"
 REPORTS = Path("reports")
 
 NOT_A_DATASET = {"apidatasetmetadata"}  # listed by GetDataSetList but holds no data
+MAX_SINGLE_RETRIES = 10  # missing items we re-ask for one at a time, per table
 
 
 @dataclass
@@ -204,6 +205,9 @@ class Downloader:
         else:
             responses = [r for r in [self._get(dataset, t, params)] if r is not None]
 
+        if dataset != "Regional" and cfg.get("check") and responses:
+            self._check_against_dictionary(dataset, cfg, table, t, responses)
+
         records = []
         for request, results in responses:
             recs, stats = to_series(results, dataset, table, request=request)
@@ -213,9 +217,6 @@ class Downloader:
         t.series = len(records)
         t.observations = sum(r["n_obs"] for r in records)
         t.empty_series = sum(1 for r in records if r["n_obs"] == 0)
-
-        if dataset != "Regional" and cfg.get("check"):
-            self._check_against_dictionary(dataset, cfg, table, t, responses)
 
         if t.requests_ok and not records:
             self.log(dataset, table, "warning", "BEA answered but the table had no data rows.")
@@ -231,14 +232,20 @@ class Downloader:
                 "retrieved": date.today().isoformat(), "n_series": len(records), "series": records})
         return t
 
-    def _get(self, dataset: str, t: TableResult, request: dict) -> tuple[dict, dict] | None:
-        """One GetData call. Returns (request, results), or None after logging the error."""
-        t.requests += 1
+    def _get(self, dataset: str, t: TableResult, request: dict, probe: bool = False) -> tuple[dict, dict] | None:
+        """One GetData call. Returns (request, results), or None after logging the error.
+
+        probe=True is for trying out a request shape (e.g. which geography a table has):
+        a failure there is expected, so it isn't logged or counted.
+        """
         try:
             results = self.client.get_data(dataset, use_cache=self.use_cache, **request)
         except Exception as exc:  # API errors and network errors alike: log and move on
-            self.log(dataset, t.table, "error", f"GetData failed for {_short(request)}: {str(exc)[:200]}")
+            if not probe:
+                t.requests += 1
+                self.log(dataset, t.table, "error", f"GetData failed for {_short(request)}: {str(exc)[:200]}")
             return None
+        t.requests += 1
         t.requests_ok += 1
         t.mb += self.client.last_bytes / (1024 * 1024)
         return request, results
@@ -259,14 +266,16 @@ class Downloader:
             return []
 
         responses, geo = [], None
-        for candidate in regional_geographies(table):  # find the geography the table supports
-            first = self._get("Regional", t, {**params, "LineCode": lines[0], "GeoFips": candidate})
+        candidates = regional_geographies(table)
+        for candidate in candidates:  # find the geography the table supports
+            first = self._get("Regional", t, {**params, "LineCode": lines[0], "GeoFips": candidate}, probe=True)
             if first:
                 responses, geo = [first], candidate
                 break
         if geo is None:
-            t.missing = lines
-            self.log("Regional", table, "error", "No geography worked for this table's first line.")
+            t.requests, t.missing = len(candidates), lines
+            self.log("Regional", table, "error", f"No geography ({', '.join(candidates)}) worked for the table's "
+                                                 "first line.")
             return []
         for line in lines[1:]:
             got = self._get("Regional", t, {**params, "LineCode": line, "GeoFips": geo})
@@ -281,7 +290,11 @@ class Downloader:
 
     def _check_against_dictionary(self, dataset: str, cfg: dict, table: str, t: TableResult,
                                   responses: list[tuple[dict, dict]]) -> None:
-        """Compare the values of `check` in the data with the dictionary's list for this table."""
+        """Compare the values of `check` in the data with the dictionary's list for this table.
+
+        Anything missing is asked for on its own, in case BEA left it out of the ALL request.
+        Whatever still has no data after that is logged.
+        """
         dim = cfg["check"]
         try:
             listed = {key_of(v) for v in as_list(self.client.get_parameter_values_filtered(
@@ -292,10 +305,32 @@ class Downloader:
             return
         found = {str(row.get(dim, "")).strip() for _, res in responses for row in as_list(res.get("Data"))}
         t.check, t.expected = f"every {dim} in the dictionary", len(listed)
-        t.missing = sorted(listed - found)
+        missing = sorted(listed - found)
+        t.missing = self._ask_one_by_one(dataset, responses[0][0], dim, missing, responses)
+        recovered = len(missing) - len(t.missing)
+        if recovered:
+            self.log(dataset, table, "info", f"{recovered} {dim} value(s) were left out of the ALL request "
+                                             "but came back when asked for on their own.")
         if t.missing:
             self.log(dataset, table, "warning", f"{len(t.missing)} of {len(listed)} {dim} values in the dictionary "
-                                                f"have no data (e.g. {', '.join(t.missing[:5])}).")
+                                                f"have no data, even when asked for on their own "
+                                                f"(e.g. {', '.join(t.missing[:5])}).")
+
+    def _ask_one_by_one(self, dataset: str, request: dict, dim: str, missing: list[str],
+                        responses: list[tuple[dict, dict]]) -> list[str]:
+        """Re-request each missing value alone (up to MAX_SINGLE_RETRIES). Returns what still has no data."""
+        still = []
+        for value in missing[:MAX_SINGLE_RETRIES]:
+            single = {**request, dim: value}
+            try:
+                results = self.client.get_data(dataset, use_cache=self.use_cache, **single)
+            except Exception:  # BEA rejects some listed values outright; that counts as no data
+                results = {}
+            if as_list(results.get("Data")):
+                responses.append((single, results))
+            else:
+                still.append(value)
+        return still + missing[MAX_SINGLE_RETRIES:]
 
     # all datasets
     def run(self, only: list[str] | None = None) -> list[DatasetResult]:

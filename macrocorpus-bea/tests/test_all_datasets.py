@@ -42,7 +42,8 @@ TABLES = {
                  {"Key": "BADTABLE", "Desc": "Always errors"}],
 }
 REGIONAL_LINES = {"SAINC1": ["1", "2", "3"], "MAGDP2": ["1", "2"], "BADTABLE": ["1"]}
-ITA_COUNTRIES = [{"Key": "AllCountries"}, {"Key": "China"}, {"Key": "Narnia"}]  # Narnia never has data
+# Narnia never has data. Atlantis is left out of AreaOrCountry=ALL but comes back when asked for alone.
+ITA_COUNTRIES = [{"Key": "AllCountries"}, {"Key": "China"}, {"Key": "Narnia"}, {"Key": "Atlantis"}]
 NIPA_LINES = 150  # x 3 frequencies = 450 series in one table: more than the old 300-series cap
 
 
@@ -76,7 +77,10 @@ def fake_get_data(ds, q):
                           "ColDescr": f"Col {c}", "DataValue": "3.0", "NoteRef": ""}
                          for r in ("111CA", "113FF") for c in ("211", "212") for y in YEARS]}
     if ds in ("ITA", "IIP"):
-        areas = ["AllCountries", "China"] if ds == "ITA" else ["AllCountries"]
+        if q.get("AreaOrCountry") == "Narnia":
+            raise download.BEAError("[40] Invalid AreaOrCountry")
+        areas = (["AllCountries", "China"] if q.get("AreaOrCountry") == "ALL" else [q["AreaOrCountry"]]) \
+            if ds == "ITA" else ["AllCountries"]
         rows = [{"Indicator": q.get("Indicator", ""), "TypeOfInvestment": q.get("TypeOfInvestment", ""),
                  "AreaOrCountry": a, "Frequency": f, "Year": str(y), "TimeSeriesId": f"{a}{f}X",
                  "TimeSeriesDescription": "Some series", "TimePeriod": f"{y}Q{k}" if f != "A" else str(y),
@@ -205,9 +209,10 @@ def test_regional_pulls_every_line_and_logs_gaps(workdir):
     assert sainc.requests == 3 and sainc.expected == 3 and sainc.missing == ["3"]
     assert sainc.series == 2 * 2                          # lines 1-2 x two states
     magdp = by["MAGDP2"]
-    assert magdp.requests_ok == 2 and magdp.requests == 3  # MSA failed once, then STATE for both lines
+    assert magdp.requests_ok == magdp.requests == 2      # MSA probe failed quietly, then STATE for both lines
     assert by["BADTABLE"].requests_ok == 0
     found = issues()
+    assert not any(i["table"] == "MAGDP2" for i in found)
     assert any(i["table"] == "SAINC1" and i["level"] == "warning" and "1 of 3 lines" in i["issue"] for i in found)
     assert any(i["table"] == "BADTABLE" and i["level"] == "error" for i in found)
 
@@ -216,10 +221,13 @@ def test_checks_against_dictionary(workdir):
     results = {r.dataset: r for r in download.run(only=["ITA", "GDPbyIndustry"], client=client())}
     ita = results["ITA"].tables[0]
     assert ita.check == "every AreaOrCountry in the dictionary" and ita.missing == ["Narnia"]
+    countries = {r["dimensions"]["AreaOrCountry"] for r in series_file("ITA", ita.table)["series"]}
+    assert countries == {"AllCountries", "China", "Atlantis"}  # Atlantis recovered by asking on its own
     gdp = results["GDPbyIndustry"].tables[0]
     assert gdp.check == "whole table in one call"        # filtered list not available on this dataset
     levels = {(i["dataset"], i["level"]) for i in issues()}
     assert ("ITA", "warning") in levels and ("GDPbyIndustry", "info") in levels
+    assert any(i["dataset"] == "ITA" and "on their own" in i["issue"] and i["level"] == "info" for i in issues())
 
 
 def test_coverage_and_config_problems_are_logged(workdir, monkeypatch):
