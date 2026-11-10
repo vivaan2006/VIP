@@ -126,6 +126,44 @@
         ]
       },
       "description": "same length as dates; null = missing"
+    },
+    "label_history": {
+      "type": "array",
+      "description": "Only when the series' names changed over time: each set of names and the dates it was used. The latest names are in `dimensions`.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "labels": {
+            "type": "object"
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "labels",
+          "from",
+          "to"
+        ]
+      }
+    },
+    "unit_history": {
+      "type": "array",
+      "description": "Only when the unit changes partway through the series: every unit seen, oldest first.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string"
+          },
+          "unit_multiplier": {
+            "type": "integer"
+          }
+        }
+      }
     }
   }
 }

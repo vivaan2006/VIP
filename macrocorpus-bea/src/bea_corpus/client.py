@@ -188,8 +188,15 @@ def extract_results(payload: dict) -> dict:
     if api.get("Error"):
         raise BEAError(_error_text(api["Error"]))
     results = api.get("Results", {})
-    if isinstance(results, list):
-        results = results[0] if results else {}
+    if isinstance(results, list):  # usually 1 item; if BEA ever sends more, keep every item's rows
+        parts = [r for r in results if isinstance(r, dict)]
+        results = dict(parts[0]) if parts else {}
+        if len(parts) > 1:
+            rows = []
+            for part in parts:
+                data = part.get("Data") or []
+                rows += [data] if isinstance(data, dict) else list(data)
+            results["Data"] = rows
     if not isinstance(results, dict):
         raise BEAError(f"Unexpected Results shape: {str(results)[:300]}")
     if results.get("Error"):

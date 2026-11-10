@@ -3,30 +3,36 @@
     "dataset": "MNE",
     "table": "16",
     "level": "error",
-    "issue": "No data with any of the request shapes tried (DirectionOfInvestment=outward, Classification=Country; DirectionOfInvestment=inward, Classification=Country; DirectionOfInvestment=inward, Classification=CountryofUBObyType; DirectionOfInvestment=outward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=inward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=parent, Classification=Industry, OwnershipLevel=1, NonbankAffiliatesOnly=0; DirectionOfInvestment=state, Classification=StatebyCountryofUBO, OwnershipLevel=0, NonbankAffiliatesOnly=0)."
-  },
-  {
-    "dataset": "MNE",
-    "table": "22",
-    "level": "info",
-    "issue": "1 of 235 series have no values at all (every value suppressed or not available)."
+    "issue": "No data with any of the 25 request shapes tried."
   },
   {
     "dataset": "MNE",
     "table": "53",
     "level": "info",
-    "issue": "10 of 234 series have no values at all (every value suppressed or not available)."
+    "issue": "8 code(s) carry several measures told apart only by their labels; split into separate series."
   },
   {
     "dataset": "MNE",
-    "table": "51",
-    "level": "error",
-    "issue": "No data with any of the request shapes tried (DirectionOfInvestment=outward, Classification=Country; DirectionOfInvestment=inward, Classification=Country; DirectionOfInvestment=inward, Classification=CountryofUBObyType; DirectionOfInvestment=outward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=inward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=parent, Classification=Industry, OwnershipLevel=1, NonbankAffiliatesOnly=0; DirectionOfInvestment=state, Classification=StatebyCountryofUBO, OwnershipLevel=0, NonbankAffiliatesOnly=0)."
+    "table": "53",
+    "level": "info",
+    "issue": "37 of 1135 series have no values at all (every value suppressed or not available)."
   },
   {
     "dataset": "MNE",
     "table": "6",
     "level": "info",
-    "issue": "13 of 238 series have no values at all (every value suppressed or not available)."
+    "issue": "2 series changed names over time; each kept as one history with every name in label_history."
+  },
+  {
+    "dataset": "MNE",
+    "table": "6",
+    "level": "info",
+    "issue": "10 code(s) carry several measures told apart only by their labels; split into separate series."
+  },
+  {
+    "dataset": "MNE",
+    "table": "6",
+    "level": "info",
+    "issue": "92 of 3082 series have no values at all (every value suppressed or not available)."
   }
 ]

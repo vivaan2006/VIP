@@ -10,7 +10,8 @@
 #                are filled with the dataset's "all" value automatically.
 #   tables       optional: these tables instead of an evenly spread sample
 #   split_by     optional: one request per value of this parameter, for datasets that refuse "everything" in one call
-#   fallbacks    optional: request shapes to try in order until one returns data (MNE)
+#   request_shapes  optional: extra request settings to try; every one that returns data is kept (MNE)
+#   identity_params optional: request settings that change what the rows mean, so they go in the series id
 #   check        optional: a dimension to compare against the dictionary's list for each table
 #                (GetParameterValuesFiltered), so missing series show up in reports/issues.json
 #
@@ -67,18 +68,40 @@ datasets:
     params: {Destination: ALL, Industry: ALL, Year: ALL}
     split_by: AreaOrCountry
 
-  MNE:                       # multinational enterprises. Each series only works with some request settings,
-    table_param: SeriesID    # so try them in order (see fallbacks) and keep the first with data.
-    params: {Country: all, Year: ALL}
+  MNE:                       # multinational enterprises. Each series exists for some directions, classifications
+    table_param: SeriesID    # and ownership levels and not others, so every shape below is tried and EVERY one
+    params: {Country: all, Year: ALL}   # that returns data is kept.
     tables: ["30", "31", "27", "25", "33"]   # the small default sample; --sample-size ignores this list
-    fallbacks:               # direct investment series (22-44, 62-69) first, then AMNE operations series (1-21, 46-61)
+    identity_params: [DirectionOfInvestment, Classification, OwnershipLevel]  # part of each series' id
+    request_shapes:
+      # direct investment series (22-44, 62-69): no ownership level
       - {DirectionOfInvestment: outward, Classification: Country}
+      - {DirectionOfInvestment: outward, Classification: Industry}
+      - {DirectionOfInvestment: outward, Classification: CountryByIndustry}
       - {DirectionOfInvestment: inward, Classification: Country}
+      - {DirectionOfInvestment: inward, Classification: Industry}
+      - {DirectionOfInvestment: inward, Classification: CountryByIndustry}
+      - {DirectionOfInvestment: inward, Classification: CountryofUBO}
+      - {DirectionOfInvestment: inward, Classification: CountryofUBObyIndustry}
+      - {DirectionOfInvestment: inward, Classification: CountrybyType}
       - {DirectionOfInvestment: inward, Classification: CountryofUBObyType}
+      # operations of multinationals (AMNE, 1-21 and 46-61). 0 = majority-owned affiliates, 1 = all affiliates.
+      # NonbankAffiliatesOnly 0 is what BEA requires for recent years. Parents must use OwnershipLevel 1.
       - {DirectionOfInvestment: outward, Classification: Country, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: outward, Classification: Country, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: outward, Classification: Industry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: outward, Classification: Industry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: outward, Classification: CountryByIndustry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: outward, Classification: CountryByIndustry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
       - {DirectionOfInvestment: inward, Classification: Country, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: inward, Classification: Country, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: inward, Classification: Industry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: inward, Classification: Industry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: inward, Classification: CountryByIndustry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: inward, Classification: CountryByIndustry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
       - {DirectionOfInvestment: parent, Classification: Industry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
       - {DirectionOfInvestment: state, Classification: StatebyCountryofUBO, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: state, Classification: StatebyCountryofUBO, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
 
   Regional:                  # states and metros: every line of each sampled table (see above)
     table_param: TableName

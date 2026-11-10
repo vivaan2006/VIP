@@ -2,36 +2,73 @@
   "run": "2026-11-09",
   "datasets": [
     {
+      "dataset": "NIUnderlyingDetail",
+      "table_param": "TableName",
+      "tables_in_dataset": 58,
+      "dictionary_params": 4,
+      "dictionary_params_listed": 4,
+      "status": "ok",
+      "series": 262,
+      "tables": [
+        {
+          "table": "U001A",
+          "description": "Table 1AU. Real Manufacturing and Trade Inventories, Seasonally Adjusted, End of Period [Chained 1996 dollars, 1967-96, SIC] (Q) (M)",
+          "requests": 1,
+          "requests_ok": 1,
+          "series": 128,
+          "observations": 30272,
+          "empty_series": 0,
+          "mb": 6.631099700927734,
+          "check": "whole table in one call",
+          "expected": null,
+          "missing": []
+        },
+        {
+          "table": "U50205",
+          "description": "Table 5.2.5U. Gross and Net Domestic Investment by Major Type (Q)",
+          "requests": 1,
+          "requests_ok": 1,
+          "series": 56,
+          "observations": 5992,
+          "empty_series": 0,
+          "mb": 1.3518648147583008,
+          "check": "whole table in one call",
+          "expected": null,
+          "missing": []
+        },
+        {
+          "table": "U90100",
+          "description": "Table 9.1U. Reconciliation of Percent Change in the CPI with Percent Change in the PCE Price Index (Q) (M)",
+          "requests": 1,
+          "requests_ok": 1,
+          "series": 78,
+          "observations": 15292,
+          "empty_series": 0,
+          "mb": 3.581332206726074,
+          "check": "whole table in one call",
+          "expected": null,
+          "missing": []
+        }
+      ]
+    },
+    {
       "dataset": "MNE",
       "table_param": "SeriesID",
       "tables_in_dataset": 57,
       "dictionary_params": 12,
       "dictionary_params_listed": 12,
       "status": "issues",
-      "series": 707,
+      "series": 4217,
       "tables": [
         {
           "table": "16",
           "description": "Balance Sheet - Balance sheet data present items typically found on corporate balance sheets, including assets and liabilities.",
-          "requests": 7,
+          "requests": 25,
           "requests_ok": 0,
           "series": 0,
           "observations": 0,
           "empty_series": 0,
           "mb": 0.0,
-          "check": "whole table in one call",
-          "expected": null,
-          "missing": []
-        },
-        {
-          "table": "22",
-          "description": "Foreign Direct Investment Position in the United States on a Historical-Cost Basis - The foreign direct investment position in the United States is the value of foreign direct investors' equity in their U.S. affiliates plus the value of net outstanding loans to their U.S. affiliates. It may be viewed as the direct investors' net financial claims on their affiliates.",
-          "requests": 1,
-          "requests_ok": 1,
-          "series": 235,
-          "observations": 4931,
-          "empty_series": 1,
-          "mb": 2.795243263244629,
           "check": "whole table in one call",
           "expected": null,
           "missing": []
@@ -39,25 +76,12 @@
         {
           "table": "53",
           "description": "Property, Plant, and Equipment Expenditures - The expenditures made by a firm to acquire, to add to, or to improve property, plant, and equipment (PPandE). PPandE includes land, timber, mineral and like-rights owned; structures, machinery, equipment, special tools, and other depreciable property; construction in progress; and tangible and intangible exploration and development costs. It excludes the changes in PPandE that are due to changes in the entity--such as mergers, acquisitions, and divestitures--or that are due to changes in accounting methods. The expenditures are measured on a gross basis; sales and other dispositions of fixed assets are not netted against them.",
-          "requests": 1,
-          "requests_ok": 1,
-          "series": 234,
-          "observations": 2084,
-          "empty_series": 10,
-          "mb": 1.2859325408935547,
-          "check": "whole table in one call",
-          "expected": null,
-          "missing": []
-        },
-        {
-          "table": "51",
-          "description": "Total Assets - U.S. Parent - Any owned physical object or intangible right",
-          "requests": 7,
-          "requests_ok": 0,
-          "series": 0,
-          "observations": 0,
-          "empty_series": 0,
-          "mb": 0.0,
+          "requests": 25,
+          "requests_ok": 5,
+          "series": 1135,
+          "observations": 11724,
+          "empty_series": 37,
+          "mb": 7.436742782592773,
           "check": "whole table in one call",
           "expected": null,
           "missing": []
@@ -65,14 +89,64 @@
         {
           "table": "6",
           "description": "Value Added (Gross Product) - The portion of the goods and services sold or added to inventory or fixed investment by a firm that reflects the production of the firm itself. It represents the firm's contribution to a country's gross domestic product, which is the value of goods and services produced by labor and property located in the country. Compared to sales, value added is a preferable measure of production because it indicates the extent to which a firm's sales result from their own production rather than from production that originates elsewhere, whereas sales data do not distinguish between these two sources of production. Value added can be measured as gross output minus intermediate inputs; alternatively, it can be measured as the sum of the costs incurred (except for intermediate inputs) and the profits earned in production. The value-added estimates presented here were prepared by summing the costs and profits data.",
-          "requests": 1,
-          "requests_ok": 1,
-          "series": 238,
-          "observations": 2567,
-          "empty_series": 13,
-          "mb": 1.1887893676757812,
+          "requests": 25,
+          "requests_ok": 7,
+          "series": 3082,
+          "observations": 38217,
+          "empty_series": 92,
+          "mb": 18.655266761779785,
           "check": "whole table in one call",
           "expected": null,
+          "missing": []
+        }
+      ]
+    },
+    {
+      "dataset": "Regional",
+      "table_param": "TableName",
+      "tables_in_dataset": 105,
+      "dictionary_params": 4,
+      "dictionary_params_listed": 4,
+      "status": "ok",
+      "series": 15141,
+      "tables": [
+        {
+          "table": "CAGDP1",
+          "description": "County gross domestic product (GDP) summary",
+          "requests": 11,
+          "requests_ok": 6,
+          "series": 9561,
+          "observations": 229464,
+          "empty_series": 0,
+          "mb": 34.039719581604004,
+          "check": "every line in the dictionary, at COUNTY, STATE",
+          "expected": 3,
+          "missing": []
+        },
+        {
+          "table": "SAGDP9",
+          "description": "Real GDP by state",
+          "requests": 98,
+          "requests_ok": 92,
+          "series": 5520,
+          "observations": 160080,
+          "empty_series": 0,
+          "mb": 25.00409698486328,
+          "check": "every line in the dictionary, at STATE",
+          "expected": 92,
+          "missing": []
+        },
+        {
+          "table": "TASUMMARY2",
+          "description": "Summary of real GDP and components for U.S. territories, chained dollars",
+          "requests": 18,
+          "requests_ok": 12,
+          "series": 60,
+          "observations": 1320,
+          "empty_series": 0,
+          "mb": 0.2356548309326172,
+          "check": "every line in the dictionary, at STATE",
+          "expected": 12,
           "missing": []
         }
       ]

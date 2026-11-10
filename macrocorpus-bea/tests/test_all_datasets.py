@@ -37,11 +37,19 @@ TABLES = {
     "IIP": [{"Key": "FinAssetsExclFinDeriv", "Desc": "Assets"}],
     "IntlServTrade": [{"Key": "Travel", "Desc": "Travel"}],
     "IntlServSTA": [{"Key": "Mofas", "Desc": "Affiliates"}],
-    "MNE": [{"key": "0", "desc": "all"}] + [{"key": k, "desc": f"series {k}"} for k in ("22", "27", "30", "31", "33")],  # no "25": warning
+    "MNE": [{"key": "0", "desc": "all"}] + [{"key": k, "desc": f"series {k}"}
+                                            for k in ("22", "27", "30", "31", "33", "6")],  # no "25": warning
     "Regional": [{"Key": "SAINC1", "Desc": "State income"}, {"Key": "MAGDP2", "Desc": "Metro GDP"},
-                 {"Key": "BADTABLE", "Desc": "Always errors"}],
+                 {"Key": "BADTABLE", "Desc": "Always errors"}, {"Key": "CAINC1", "Desc": "County income"},
+                 {"Key": "CAINC91", "Desc": "County earnings flows"}],
 }
-REGIONAL_LINES = {"SAINC1": ["1", "2", "3"], "MAGDP2": ["1", "2"], "BADTABLE": ["1"]}
+REGIONAL_LINES = {"SAINC1": ["1", "2", "3"], "MAGDP2": ["1", "2"], "BADTABLE": ["1"], "CAINC1": ["1", "2"],
+                  "CAINC91": ["10", "20"]}
+# which geography levels each fake Regional table is published at (everything else errors, like BEA)
+REGIONAL_LEVELS = {"SAINC1": {"STATE"}, "MAGDP2": {"STATE"}, "CAINC1": {"COUNTY", "STATE"}, "CAINC91": {"COUNTY"}}
+REGIONAL_PLACES = {"STATE": [("01000", "Alabama"), ("13000", "Georgia")],
+                   # BEA's county pull also carries the state rows, so they overlap with the STATE pull
+                   "COUNTY": [("10001", "Kent"), ("13121", "Fulton"), ("13000", "Georgia")]}
 # Narnia never has data. Atlantis is left out of AreaOrCountry=ALL but comes back when asked for alone.
 ITA_COUNTRIES = [{"Key": "AllCountries"}, {"Key": "China"}, {"Key": "Narnia"}, {"Key": "Atlantis"}]
 NIPA_LINES = 150  # x 3 frequencies = 450 series in one table: more than the old 300-series cap
@@ -93,8 +101,13 @@ def fake_get_data(ds, q):
                           "CL_UNIT": "USD", "UNIT_MULT": "6", "DataValue": "100", "NoteRef": ""}
                          for d in ("Exports", "Imports") for y in YEARS]}
     if ds == "MNE":
-        direction = q.get("DirectionOfInvestment", "")
-        if (q["SeriesID"] == "22") != (direction == "inward"):  # 22 is inward only, the rest outward only
+        direction, sid = q.get("DirectionOfInvestment", ""), q["SeriesID"]
+        if q.get("Classification", "Country") != "Country":
+            raise download.BEAError("[40] Invalid Classification for this series")
+        if sid == "6":  # operations series: needs an ownership level, exists both outward and inward
+            if q.get("OwnershipLevel") != "0" or direction not in ("outward", "inward"):
+                raise download.BEAError("[40] OwnershipLevel required")
+        elif "OwnershipLevel" in q or (sid == "22") != (direction == "inward"):  # 22 inward only, rest outward
             raise download.BEAError("[40] Invalid combination of DirectionOfInvestment and SeriesID")
         return {"Data": [{"Year": str(y), "SeriesID": q["SeriesID"], "SeriesName": "Position", "Row": c,
                           "Column": "All Industries", "RowCode": c, "ColumnCode": "0000",
@@ -102,13 +115,13 @@ def fake_get_data(ds, q):
                          for c in ("308", "309", "XX") for y in YEARS]}
     if ds == "Regional":
         table, line, geo = q["TableName"], q["LineCode"], q["GeoFips"]
-        if table == "BADTABLE" or (table.startswith("MA") and geo == "MSA"):
-            raise download.BEAError("[40] Invalid parameter")
+        if table == "BADTABLE" or geo not in REGIONAL_LEVELS[table]:
+            raise download.BEAError("[40] Invalid GeoFips for this table")
         if table == "SAINC1" and line == "3":
             return {"Data": []}  # a line the dictionary lists but that has no data
         return {"Data": [{"Code": f"{table}-{line}", "GeoFips": f, "GeoName": n, "TimePeriod": str(y),
                           "CL_UNIT": "Dollars", "UNIT_MULT": "0", "DataValue": "500"}
-                         for f, n in (("01000", "Alabama"), ("13000", "Georgia")) for y in YEARS]}
+                         for f, n in REGIONAL_PLACES[geo] for y in YEARS]}
     raise AssertionError(ds)
 
 
@@ -210,18 +223,31 @@ def test_every_series_in_a_table_no_cap(workdir):
 
 
 def test_regional_pulls_every_line_and_logs_gaps(workdir):
-    r = download.run(only=["Regional"], client=client())[0]
+    r = download.run(only=["Regional"], sample_size=1000, client=client())[0]
     by = {t.table: t for t in r.tables}
     sainc = by["SAINC1"]
-    assert sainc.requests == 3 and sainc.expected == 3 and sainc.missing == ["3"]
+    assert sainc.check.endswith("at STATE") and sainc.expected == 3 and sainc.missing == ["3"]
     assert sainc.series == 2 * 2                          # lines 1-2 x two states
     magdp = by["MAGDP2"]
-    assert magdp.requests_ok == magdp.requests == 2      # MSA probe failed quietly, then STATE for both lines
-    assert by["BADTABLE"].requests_ok == 0
+    assert magdp.series == 2 * 2 and magdp.check.endswith("at STATE")  # metro levels refused, STATE kept
+    assert by["BADTABLE"].series == 0
     found = issues()
-    assert not any(i["table"] == "MAGDP2" for i in found)
+    assert not any(i["table"] == "MAGDP2" and i["level"] != "info" for i in found)
     assert any(i["table"] == "SAINC1" and i["level"] == "warning" and "1 of 3 lines" in i["issue"] for i in found)
     assert any(i["table"] == "BADTABLE" and i["level"] == "error" for i in found)
+
+
+def test_regional_keeps_every_geography_level_and_counties(workdir):
+    by = {t.table: t for t in download.run(only=["Regional"], sample_size=1000, client=client())[0].tables}
+    # CAINC1 is published for counties AND states: both kept, Georgia (in both pulls) only once
+    ca = series_file("Regional", "CAINC1")["series"]
+    assert by["CAINC1"].check.endswith("at COUNTY, STATE")
+    geos = sorted(s["dimensions"]["GeoFips"] for s in ca)
+    assert geos == sorted(["10001", "13121", "13000", "01000"] * 2)
+    assert len({s["series_id"] for s in ca}) == len(ca)
+    # CAINC91 only exists at county level: the old STATE-then-national logic got nothing here
+    kent = [s for s in series_file("Regional", "CAINC91")["series"] if s["dimensions"]["GeoFips"] == "10001"]
+    assert len(kent) == 2 and by["CAINC91"].missing == []
 
 
 def test_checks_against_dictionary(workdir):
@@ -295,19 +321,28 @@ def test_runs_from_any_folder(tmp_path, monkeypatch):
 
 def test_full_run_ignores_hand_picked_tables_and_skips_all(workdir):
     r = download.run(only=["MNE"], sample_size=1000, client=client())[0]
-    assert sorted(t.table for t in r.tables) == ["22", "27", "30", "31", "33"]  # every series ID, no "0" = all
-    by = {t.table: t for t in r.tables}
-    assert all(t.series and t.requests_ok == t.requests == 1 for t in by.values())
+    assert sorted(t.table for t in r.tables) == ["22", "27", "30", "31", "33", "6"]  # every series ID, no "0" = all
+    assert all(t.series for t in r.tables)
     inward = series_file("MNE", "22")["series"]
-    assert inward  # outward failed, so it fell back to inward
+    assert {s["dimensions"]["DirectionOfInvestment"] for s in inward} == {"inward"}
     assert not [i for i in issues() if i["level"] == "error"]
 
 
-def test_fallbacks_log_one_error_when_nothing_works(workdir):
+def test_mne_keeps_every_shape_that_has_data(workdir):
+    download.run(only=["MNE"], sample_size=1000, client=client())
+    six = series_file("MNE", "6")["series"]
+    # series 6 exists outward AND inward: both kept, told apart in the id, not first-one-wins
+    assert {s["dimensions"]["DirectionOfInvestment"] for s in six} == {"outward", "inward"}
+    assert len({s["series_id"] for s in six}) == len(six) == 2 * 3
+    assert all(".outward." in s["series_id"] or ".inward." in s["series_id"] for s in six)
+    assert all(s["unit"] == "USD" and s["unit_multiplier"] == 6 for s in six)  # from TableScale
+
+
+def test_no_shape_works_logs_one_error(workdir):
     d = download.Downloader(client(), {"datasets": {}})
     t = download.TableResult("22", "")
-    got = d._with_fallbacks("MNE", t, {"SeriesID": "22", "Year": "ALL", "SomethingNew": "ALL"},
-                            [{"DirectionOfInvestment": "parent"}, {"DirectionOfInvestment": "state"}])
+    got = d._all_shapes("MNE", t, {"SeriesID": "22", "Year": "ALL", "SomethingNew": "ALL"},
+                        [{"DirectionOfInvestment": "parent"}, {"DirectionOfInvestment": "state"}])
     assert got == [] and (t.requests, t.requests_ok) == (2, 0)
     assert len(d.issues) == 1 and d.issues[0].level == "error"
 
@@ -332,3 +367,45 @@ def test_intlservsta_one_request_per_country(workdir, monkeypatch):
     areas = {s["dimensions"]["AreaOrCountry"] for s in series_file("IntlServSTA", t.table)["series"]}
     assert areas == {"AllCountries", "China"}
     assert not [i for i in issues() if i["level"] == "error"]
+
+
+def test_empty_whole_table_is_retried_one_frequency_at_a_time(workdir, monkeypatch):
+    real = fake_get_data
+
+    def empty_when_mixed(ds, q):  # like U20403: nothing for Frequency=A,Q,M, data one frequency at a time
+        if ds == "NIUnderlyingDetail" and "," in q.get("Frequency", ""):
+            return {"Data": []}
+        return real(ds, q)
+
+    monkeypatch.setitem(globals(), "fake_get_data", empty_when_mixed)
+    t = download.run(only=["NIUnderlyingDetail"], client=client())[0].tables[0]
+    assert download._status_word(t) == "ok"
+    assert t.requests == 4 and t.requests_ok == 3  # the empty whole-table call, then A, Q, M
+    freqs = {s["frequency"] for s in series_file("NIUnderlyingDetail", t.table)["series"]}
+    assert freqs == {"A", "Q", "M"}
+    assert any("smaller requests" in i["issue"] and i["level"] == "info" for i in issues())
+
+
+def test_empty_table_is_fail_not_ok_and_old_files_go(workdir, monkeypatch):
+    download.run(only=["NIUnderlyingDetail"], client=client())
+    path = Path("data/corpus/NIUnderlyingDetail/series/U20305.json")
+    assert path.exists()
+    monkeypatch.setitem(globals(), "fake_get_data", lambda ds, q: {"Data": []})
+    t = download.run(only=["NIUnderlyingDetail"], client=client(), use_cache=False)[0].tables[0]
+    assert download._status_word(t) == "FAIL" and t.series == 0
+    assert not path.exists()  # an old run's file doesn't pass for this run's result
+    assert any(i["level"] == "error" and i["table"] == "U20305" for i in issues())
+
+
+def test_subset_run_keeps_the_other_datasets_in_the_reports(workdir):
+    download.run(only=["NIPA", "ITA"], client=client())
+    download.run(only=["ITA"], client=client())
+    names = [d["dataset"] for d in json.loads(Path("reports/coverage.json").read_text())["datasets"]]
+    assert sorted(names) == ["ITA", "NIPA"]
+    assert "| NIPA |" in Path("reports/coverage.md").read_text()
+
+
+def test_every_results_entry_is_kept():
+    from bea_corpus.client import extract_results
+    payload = {"BEAAPI": {"Results": [{"Statistic": "x", "Data": [{"a": 1}]}, {"Data": {"a": 2}}]}}
+    assert extract_results(payload)["Data"] == [{"a": 1}, {"a": 2}]

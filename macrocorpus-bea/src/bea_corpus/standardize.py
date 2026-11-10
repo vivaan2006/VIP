@@ -13,6 +13,7 @@ base units (e.g. unit_mult=6 means the value is in millions).
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -95,15 +96,20 @@ def standardize(results: dict, spec: SeriesSpec, retrieved: date | None = None) 
     df["freq"] = parsed.map(lambda p: p[1])
     df["value"] = df["DataValue"].map(parse_value)
 
-    keys = [k for k in SERIES_KEYS.get(spec.dataset, []) if k in df.columns]
-    groups = df.groupby(keys, sort=False) if keys else [((), df)]
+    keys = [k for k in SERIES_KEYS.get(spec.dataset, []) if k in df.columns] + ["freq"]
+    groups = df.groupby(keys, sort=False)
 
     obs_frames, meta_rows = [], []
-    multi = keys and df.groupby(keys).ngroups > 1
+    multi = df.groupby(keys).ngroups > 1
     for key, g in groups:
         key = key if isinstance(key, tuple) else (key,)
-        sid = spec.id if not multi else f"{spec.id}.{'.'.join(_slug(k) for k in key)}"
-        g = g.sort_values("date").drop_duplicates("date", keep="last")
+        id_parts = key if df["freq"].nunique() > 1 else key[:-1]  # frequency only when the request mixes them
+        sid = spec.id if not multi else f"{spec.id}.{'.'.join(_slug(k) for k in id_parts)}"
+        g = g.sort_values("date", kind="stable")
+        repeated = g[g.duplicated("date", keep=False)]
+        if repeated.groupby("date")["value"].nunique(dropna=False).gt(1).any():
+            warnings.warn(f"{sid}: BEA sent different numbers for the same date; kept the first")
+        g = g.drop_duplicates("date", keep="first")
         obs_frames.append(pd.DataFrame({"series_id": sid, "date": g["date"], "value": g["value"]}))
         meta_rows.append(_metadata_row(sid, g, spec, results, retrieved))
 

@@ -1,27 +1,34 @@
 # BEA coverage check
 
-Run on 2026-11-09. For each dataset: the full dictionary, then every series in a sample of its tables. `Checked` says how we know a table is complete: either we compared it with the dictionary's list, or BEA returns the whole table in one call.
+Run on 2026-11-09. For each dataset: the full dictionary, then every series in the chosen tables. `Checked` says how we know a table is complete. `Requests with data` counts every request made, including ones that tried a geography or setting BEA doesn't publish.
 
-| Dataset | Status | Dictionary params listed | Tables in dataset | Sampled | Requests ok | Series | Observations | MB |
+| Dataset | Status | Dictionary params listed | Tables in dataset | Downloaded | Requests with data | Series | Observations | MB |
 |---|---|---|---|---|---|---|---|---|
-| MNE | issues | 12/12 | 57 | 5 | 3/17 | 707 | 9582 | 5.3 |
+| NIUnderlyingDetail | ok | 4/4 | 58 | 3 | 3/3 | 262 | 51556 | 11.6 |
+| MNE | issues | 12/12 | 57 | 3 | 12/75 | 4217 | 49941 | 26.1 |
+| Regional | ok | 4/4 | 105 | 3 | 110/127 | 15141 | 390864 | 59.3 |
 
-**707 series** downloaded in total.
+**19620 series** downloaded in total.
 
-## Sampled tables
+## Tables
 
-| Dataset | Table | Series | Requests ok | Checked | Missing |
+| Dataset | Table | Series | Requests with data | Checked | Missing |
 |---|---|---|---|---|---|
-| MNE | 16 | 0 | 0/7 | whole table in one call | - |
-| MNE | 22 | 235 | 1/1 | whole table in one call | - |
-| MNE | 53 | 234 | 1/1 | whole table in one call | - |
-| MNE | 51 | 0 | 0/7 | whole table in one call | - |
-| MNE | 6 | 238 | 1/1 | whole table in one call | - |
+| NIUnderlyingDetail | U001A | 128 | 1/1 | whole table in one call | - |
+| NIUnderlyingDetail | U50205 | 56 | 1/1 | whole table in one call | - |
+| NIUnderlyingDetail | U90100 | 78 | 1/1 | whole table in one call | - |
+| MNE | 16 | 0 | 0/25 | whole table in one call | - |
+| MNE | 53 | 1135 | 5/25 | whole table in one call | - |
+| MNE | 6 | 3082 | 7/25 | whole table in one call | - |
+| Regional | CAGDP1 | 9561 | 6/11 | every line in the dictionary, at COUNTY, STATE | 0 of 3 |
+| Regional | SAGDP9 | 5520 | 92/98 | every line in the dictionary, at STATE | 0 of 92 |
+| Regional | TASUMMARY2 | 60 | 12/18 | every line in the dictionary, at STATE | 0 of 12 |
 
 ## Issues
 
-- **error** MNE / 16: No data with any of the request shapes tried (DirectionOfInvestment=outward, Classification=Country; DirectionOfInvestment=inward, Classification=Country; DirectionOfInvestment=inward, Classification=CountryofUBObyType; DirectionOfInvestment=outward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=inward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=parent, Classification=Industry, OwnershipLevel=1, NonbankAffiliatesOnly=0; DirectionOfInvestment=state, Classification=StatebyCountryofUBO, OwnershipLevel=0, NonbankAffiliatesOnly=0).
-- **error** MNE / 51: No data with any of the request shapes tried (DirectionOfInvestment=outward, Classification=Country; DirectionOfInvestment=inward, Classification=Country; DirectionOfInvestment=inward, Classification=CountryofUBObyType; DirectionOfInvestment=outward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=inward, Classification=Country, OwnershipLevel=0, NonbankAffiliatesOnly=0; DirectionOfInvestment=parent, Classification=Industry, OwnershipLevel=1, NonbankAffiliatesOnly=0; DirectionOfInvestment=state, Classification=StatebyCountryofUBO, OwnershipLevel=0, NonbankAffiliatesOnly=0).
-- **info** MNE / 22: 1 of 235 series have no values at all (every value suppressed or not available).
-- **info** MNE / 53: 10 of 234 series have no values at all (every value suppressed or not available).
-- **info** MNE / 6: 13 of 238 series have no values at all (every value suppressed or not available).
+- **error** MNE / 16: No data with any of the 25 request shapes tried.
+- **info** MNE / 53: 8 code(s) carry several measures told apart only by their labels; split into separate series.
+- **info** MNE / 53: 37 of 1135 series have no values at all (every value suppressed or not available).
+- **info** MNE / 6: 2 series changed names over time; each kept as one history with every name in label_history.
+- **info** MNE / 6: 10 code(s) carry several measures told apart only by their labels; split into separate series.
+- **info** MNE / 6: 92 of 3082 series have no values at all (every value suppressed or not available).
