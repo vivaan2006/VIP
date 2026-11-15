@@ -6,8 +6,7 @@ One command does all of it (`python -m bea_corpus download`, also the default co
   for each dataset:
   1. dictionary GetParameterList + GetParameterValues for every parameter
                 -> data/corpus/<Dataset>/dictionary.json
-  2. tables     `sample_size` tables spread across the dataset's table list (or the ones in `tables`);
-                `python run.py` uses 1000, i.e. every table
+  2. tables     every table in the dataset's table list (or with --sample, a few spread across it)
   3. series     EVERY series in each sampled table: all lines, all years, all frequencies
                 -> data/corpus/<Dataset>/series/<table>.json   (standard JSON, one record per series)
                 raw BEA responses -> data/raw/<Dataset>/<table>.json
@@ -205,8 +204,9 @@ class Downloader:
             self.log(dataset, "", "error", f"The dictionary has no values for {table_param}, so no tables to sample.")
             return result
 
-        chosen = [str(t) for t in cfg.get("tables", [])] or pick_evenly(
-            list(catalog), int(cfg.get("sample_size", self.defaults.get("sample_size", 5))))
+        n = cfg.get("sample_size", self.defaults.get("sample_size"))  # None = every table
+        chosen = [str(t) for t in cfg.get("tables", [])] or (
+            list(catalog) if n is None else pick_evenly(list(catalog), int(n)))
         for table in chosen:
             if table not in catalog:
                 self.log(dataset, table, "warning", f"Chosen table is not in the dictionary's {table_param} list.")
@@ -584,14 +584,23 @@ def write_reports(results: list[DatasetResult], issues: list[Issue], partial: bo
 # ---------- entry points ----------
 
 def run(config_path: str | Path = "config/datasets.yaml", only: list[str] | None = None,
-        sample_size: int | None = None, use_cache: bool = True,
-        client: BEAClient | None = None) -> list[DatasetResult]:
+        sample: int | str | None = None, use_cache: bool = True,
+        client: BEAClient | None = None, sample_size: int | None = None) -> list[DatasetResult]:
+    """Download every dataset's dictionary and series.
+
+    sample=None     every table of every dataset (the default)
+    sample="quick"  the small test set in the config (`sample_size` / `tables` per dataset)
+    sample=N        N tables per dataset, spread across its table list
+    sample_size is the old name for sample=N; anything >= a dataset's table count means every table.
+    """
     config = yaml.safe_load(Path(config_path).read_text())
-    if sample_size:
-        config.setdefault("defaults", {})["sample_size"] = sample_size
+    if sample_size is not None:
+        sample = sample_size
+    if sample != "quick":
+        config.setdefault("defaults", {})["sample_size"] = None if sample is None else int(sample)
         for cfg in config["datasets"].values():
             cfg.pop("sample_size", None)
-            cfg.pop("tables", None)  # a hand-picked list would cap the dataset below sample_size
+            cfg.pop("tables", None)  # a hand-picked list would cap the dataset
     return Downloader(client or BEAClient(), config, use_cache=use_cache).run(only)
 
 

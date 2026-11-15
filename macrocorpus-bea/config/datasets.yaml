@@ -1,8 +1,10 @@
 # What `python -m bea_corpus download` pulls from each of BEA's 12 datasets.
 #
 # For every dataset it saves the full dictionary (every parameter and all its values),
-# then picks `sample_size` tables spread across the dataset's table list and downloads
-# EVERY series in each of them.
+# then downloads EVERY series in EVERY table.
+#
+# `sample_size` and `tables` below only matter for a quick test run (`--sample` with no number):
+# then it takes `sample_size` tables spread across each dataset's list, or the ones in `tables`.
 #
 #   table_param  the parameter that names a table in this dataset
 #   params       the rest of the GetData request. ALL = every year / frequency / country,
@@ -71,7 +73,7 @@ datasets:
   MNE:                       # multinational enterprises. Each series exists for some directions, classifications
     table_param: SeriesID    # and ownership levels and not others, so every shape below is tried and EVERY one
     params: {Country: all, Year: ALL}   # that returns data is kept.
-    tables: ["30", "31", "27", "25", "33"]   # the small default sample; --sample-size ignores this list
+    tables: ["30", "31", "27", "25", "33"]   # only for a quick --sample run
     identity_params: [DirectionOfInvestment, Classification, OwnershipLevel]  # part of each series' id
     request_shapes:
       # direct investment series (22-44, 62-69): no ownership level

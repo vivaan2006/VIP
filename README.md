@@ -13,7 +13,7 @@ Our part of MacroCorpus: pulling data from the BEA (Bureau of Economic Analysis)
 
    - The full run is long, plan on leaving it overnight, and needs 10+ GB of free disk. Regional now pulls every county, metro and state for every line, MNE tries 25 request settings per series, and BEA only allows 100 requests a minute.
    - If it stops (laptop sleeps, Wi-Fi drops), run `python run.py` again. Every finished request is saved, so it skips straight to where it left off.
-   - `python run.py --sample-size 5` is a quick test run (5 tables per dataset, about 10 minutes).
+   - `python run.py --sample` is a quick test run (a few tables per dataset, about 10 minutes). `--sample 10` takes 10 tables per dataset.
    - `--only NIPA MNE` runs just some datasets, and `--refresh` ignores saved responses.
 
    Needs Python 3.10+. If `pip install` complains, use a virtual environment: `python3 -m venv .venv && source .venv/bin/activate && python run.py`
@@ -48,7 +48,7 @@ Runs IIP, MNE, IntlServTrade, FixedAssets and NIUnderlyingDetail (set in `config
 - Uses the BEA API key to call BEA's official API. No web scraping, it's just requests that return JSON.
 - Checks BEA's list of datasets against `config/datasets.yaml`, so if BEA adds a dataset we'd see it in the issues.
 - For each of the 12 datasets, saves the **dictionary**: every parameter and every value it can take (all tables, industries, countries, etc.).
-- `python run.py` downloads **every table** of every dataset (sample size 1000, bigger than any dataset's table count) and **every series in each table**, no cap. `--sample-size 5` takes 5 tables spread across each dataset's list instead.
+- `python run.py` (or `python -m bea_corpus download`) downloads **every table** of every dataset and **every series in each table**, no cap. Nothing to add. `--sample` is only for quick test runs.
 - **Regional**: one line per request, so it requests every line, at **every geography level the table has** (county, state, metro, micropolitan, metro division, combined area, metro/nonmetro portion). It keeps all the levels that return data instead of stopping at the first one.
 - **MNE**: each series exists for some directions (outward, inward, parent, state), classifications (by country, industry, country x industry, ...) and ownership levels and not others. It tries all 25 combinations in `config/datasets.yaml` and keeps **every one with data**. Direction, classification and ownership level go in the series id.
 - **IntlServSTA**: BEA won't send every country at once, so it's one request per country.
