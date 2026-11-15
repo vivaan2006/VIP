@@ -280,6 +280,9 @@ class Downloader:
         if stats.get("measure_splits"):
             self.log(dataset, table, "info", f"{stats['measure_splits']} code(s) carry several measures told apart "
                                              "only by their labels; split into separate series.")
+        if stats.get("identical_merged"):
+            self.log(dataset, table, "info", f"{stats['identical_merged']} series had exactly the same numbers as "
+                                             "another breakdown of this table; folded in, listed under also_as.")
         if stats.get("unit_changes"):
             self.log(dataset, table, "warning", f"{stats['unit_changes']} series change units partway through; "
                                                 "see unit_history.")

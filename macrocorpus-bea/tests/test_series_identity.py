@@ -86,3 +86,32 @@ def test_every_row_is_read_no_cap():
     rows += [{"Code": "X", "GeoFips": "01000", "Extra": "B", "TimePeriod": "2999", "DataValue": "2"}]
     recs, _ = to_series({"Data": rows}, "Regional", "T")
     assert len(recs) == 2 and sum(r["n_obs"] for r in recs) == 2501
+
+
+def _views(values_by_view):
+    rows = []
+    for (classification, code), vals in values_by_view.items():
+        rows += [{**mne_row(2015 + i, code, f"Place {code}", v), "Classification": classification}
+                 for i, v in enumerate(vals)]
+    return rows
+
+
+def test_same_numbers_in_two_breakdowns_become_one_record():
+    by_country = ({"Classification": "Country"}, {"Data": [mne_row(2015 + i, "100", "Canada", v)
+                                                           for i, v in enumerate([5, 6, 7, 8])]})
+    by_country_industry = ({"Classification": "CountryByIndustry"},
+                           {"Data": [mne_row(2015 + i, "100", "Canada", v) for i, v in enumerate([5, 6, 7, 8])] +
+                                    [mne_row(2015 + i, "200", "Mexico", v) for i, v in enumerate([1, 2, 3, 4])]})
+    recs, stats = table_to_series([by_country, by_country_industry], "MNE", "8", identity_params=["Classification"])
+    assert len(recs) == 2 and stats["identical_merged"] == 1
+    canada = next(r for r in recs if r["dimensions"]["RowCode"] == "100")
+    assert canada["series_id"] < canada["also_as"][0]["series_id"]  # smallest id kept, same every run
+    assert {canada["dimensions"]["Classification"], canada["also_as"][0]["dimensions"]["Classification"]} == \
+        {"Country", "CountryByIndustry"}
+
+
+def test_short_or_constant_series_are_not_merged():
+    rows = [mne_row(2015 + i, code, code, v) for code in ("1", "2") for i, v in enumerate([0, 0, 0, 0])]
+    rows += [mne_row(2015 + i, code, code, v) for code in ("3", "4") for i, v in enumerate([1, 2])]
+    recs, stats = to_series({"Data": rows}, "MNE", "8")
+    assert len(recs) == 4 and not stats.get("identical_merged")

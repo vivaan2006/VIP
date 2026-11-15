@@ -164,6 +164,24 @@
           }
         }
       }
+    },
+    "also_as": {
+      "type": "array",
+      "description": "Only when other breakdowns of the same table carried exactly these numbers: the ids, titles and dimensions they had. Those records were folded into this one.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "series_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "object"
+          }
+        }
+      }
     }
   }
 }
