@@ -316,11 +316,52 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
         if len(units_seen) > 1:
             record["unit_history"] = [{"unit": u, "unit_multiplier": m} for u, m in units_seen]
         records.append(record)
+    records, merged = merge_identical(records)
+    if merged:
+        stats["identical_merged"] = merged
     stats["series"] = len(records)
     out = dict(stats)
     if conflicts:
         out["conflict_examples"] = conflicts
     return records, out
+
+
+MIN_OBS_TO_MERGE = 3  # shorter series match by coincidence too easily
+
+
+def merge_identical(records: list[dict]) -> tuple[list[dict], int]:
+    """Fold series with exactly the same numbers into one record.
+
+    The same numbers often come back under two breakdowns of one table (MNE's by-country view and its
+    country-by-industry view both carry each country's all-industries total). One record is kept, the one
+    with the smallest id so it's the same every run, and every other breakdown it appeared under is listed
+    in `also_as`, so nothing is lost.
+
+    Only merged when frequency, dates, values and units all match, there are at least MIN_OBS_TO_MERGE
+    numbers, and the numbers aren't one constant (two unrelated series that are all zeros aren't the
+    same series).
+    """
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    keep_as_is = []
+    for r in records:
+        nums = [v for v in r["values"] if v is not None]
+        if len(nums) < MIN_OBS_TO_MERGE or len(set(nums)) == 1:
+            keep_as_is.append(r)
+            continue
+        key = (r["frequency"], tuple(r["dates"]), tuple(r["values"]), r["unit"], r["unit_multiplier"])
+        groups[key].append(r)
+    out, merged = list(keep_as_is), 0
+    for same in groups.values():
+        same.sort(key=lambda r: r["series_id"])
+        kept = same[0]
+        if len(same) > 1:
+            kept["also_as"] = [{"series_id": r["series_id"], "title": r["title"], "dimensions": r["dimensions"]}
+                               for r in same[1:]]
+            merged += len(same) - 1
+        out.append(kept)
+    order = {id(r): i for i, r in enumerate(records)}
+    out.sort(key=lambda r: order[id(r)])
+    return out, merged
 
 
 def metadata_only(record: dict) -> dict:

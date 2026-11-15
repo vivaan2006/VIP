@@ -65,7 +65,7 @@ def _nipa_like(q):
                        [f"{y}M{m:02d}" for y in YEARS for m in range(1, 13)])
             rows += [{"TableName": q["TableName"], "SeriesCode": f"S{line}", "LineNumber": str(line),
                       "LineDescription": f"Line {line}", "TimePeriod": p, "METRIC_NAME": "Fisher Quantity Index",
-                      "CL_UNIT": "Level", "UNIT_MULT": "0", "DataValue": f"{1000 + i:,}", "NoteRef": ""}
+                      "CL_UNIT": "Level", "UNIT_MULT": "0", "DataValue": f"{1000 * line + i:,}", "NoteRef": ""}
                      for i, p in enumerate(periods)]
     return {"Data": rows, "PublicTable": f"Table {q['TableName']}"}
 
