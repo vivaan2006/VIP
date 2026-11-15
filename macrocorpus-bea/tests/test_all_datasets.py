@@ -199,7 +199,7 @@ def series_file(dataset, table):
 
 
 def test_downloads_all_twelve_datasets(workdir):
-    results = {r.dataset: r for r in download.run(client=client())}
+    results = {r.dataset: r for r in download.run(sample="quick", client=client())}
     assert len(results) == 12
     for name, r in results.items():
         assert r.series > 0, name
@@ -216,14 +216,14 @@ def test_downloads_all_twelve_datasets(workdir):
 
 
 def test_every_series_in_a_table_no_cap(workdir):
-    results = {r.dataset: r for r in download.run(only=["NIPA"], client=client())}
+    results = {r.dataset: r for r in download.run(only=["NIPA"], sample="quick", client=client())}
     nipa = results["NIPA"]
     assert len(nipa.tables) == 5                         # sample_size from the config
     assert {t.series for t in nipa.tables} == {NIPA_LINES * 3}  # all 450 series, not stopped at 300
 
 
 def test_regional_pulls_every_line_and_logs_gaps(workdir):
-    r = download.run(only=["Regional"], sample_size=1000, client=client())[0]
+    r = download.run(only=["Regional"], client=client())[0]
     by = {t.table: t for t in r.tables}
     sainc = by["SAINC1"]
     assert sainc.check.endswith("at STATE") and sainc.expected == 3 and sainc.missing == ["3"]
@@ -238,7 +238,7 @@ def test_regional_pulls_every_line_and_logs_gaps(workdir):
 
 
 def test_regional_keeps_every_geography_level_and_counties(workdir):
-    by = {t.table: t for t in download.run(only=["Regional"], sample_size=1000, client=client())[0].tables}
+    by = {t.table: t for t in download.run(only=["Regional"], client=client())[0].tables}
     # CAINC1 is published for counties AND states: both kept, Georgia (in both pulls) only once
     ca = series_file("Regional", "CAINC1")["series"]
     assert by["CAINC1"].check.endswith("at COUNTY, STATE")
@@ -251,7 +251,7 @@ def test_regional_keeps_every_geography_level_and_counties(workdir):
 
 
 def test_checks_against_dictionary(workdir):
-    results = {r.dataset: r for r in download.run(only=["ITA", "GDPbyIndustry"], client=client())}
+    results = {r.dataset: r for r in download.run(only=["ITA", "GDPbyIndustry"], sample="quick", client=client())}
     ita = results["ITA"].tables[0]
     assert ita.check == "every AreaOrCountry in the dictionary" and ita.missing == ["Narnia"]
     countries = {r["dimensions"]["AreaOrCountry"] for r in series_file("ITA", ita.table)["series"]}
@@ -265,7 +265,7 @@ def test_checks_against_dictionary(workdir):
 
 def test_coverage_and_config_problems_are_logged(workdir, monkeypatch):
     monkeypatch.setattr(BEAClient, "extra_datasets", ["BrandNewDataset"], raising=False)
-    results = {r.dataset: r for r in download.run(client=client())}
+    results = {r.dataset: r for r in download.run(sample="quick", client=client())}
     found = issues()
     assert any(i["dataset"] == "BrandNewDataset" and i["level"] == "error" for i in found)
     assert not any(i["dataset"] == "APIDatasetMetaData" for i in found)
@@ -276,7 +276,7 @@ def test_coverage_and_config_problems_are_logged(workdir, monkeypatch):
 
 
 def test_restandardize_matches(workdir):
-    download.run(only=["NIPA", "Regional"], client=client())
+    download.run(only=["NIPA", "Regional"], sample="quick", client=client())
     before = series_file("Regional", "SAINC1")["series"]
     download.restandardize()
     assert series_file("Regional", "SAINC1")["series"] == before
@@ -320,7 +320,7 @@ def test_runs_from_any_folder(tmp_path, monkeypatch):
 
 
 def test_full_run_ignores_hand_picked_tables_and_skips_all(workdir):
-    r = download.run(only=["MNE"], sample_size=1000, client=client())[0]
+    r = download.run(only=["MNE"], client=client())[0]
     assert sorted(t.table for t in r.tables) == ["22", "27", "30", "31", "33", "6"]  # every series ID, no "0" = all
     assert all(t.series for t in r.tables)
     inward = series_file("MNE", "22")["series"]
@@ -329,7 +329,7 @@ def test_full_run_ignores_hand_picked_tables_and_skips_all(workdir):
 
 
 def test_mne_keeps_every_shape_that_has_data(workdir):
-    download.run(only=["MNE"], sample_size=1000, client=client())
+    download.run(only=["MNE"], client=client())
     six = series_file("MNE", "6")["series"]
     # series 6 exists outward AND inward: both kept, told apart in the id, not first-one-wins
     assert {s["dimensions"]["DirectionOfInvestment"] for s in six} == {"outward", "inward"}
@@ -361,7 +361,7 @@ def test_intlservsta_one_request_per_country(workdir, monkeypatch):
 
     monkeypatch.setitem(globals(), "fake_get_data", picky)
     monkeypatch.setattr(BEAClient, "_request", fake_request)
-    r = download.run(only=["IntlServSTA"], client=client())[0]
+    r = download.run(only=["IntlServSTA"], sample="quick", client=client())[0]
     t = r.tables[0]
     assert t.requests == 3 and t.requests_ok == 2 and t.missing == ["Narnia"]  # ALL is skipped, not requested
     areas = {s["dimensions"]["AreaOrCountry"] for s in series_file("IntlServSTA", t.table)["series"]}
@@ -378,7 +378,7 @@ def test_empty_whole_table_is_retried_one_frequency_at_a_time(workdir, monkeypat
         return real(ds, q)
 
     monkeypatch.setitem(globals(), "fake_get_data", empty_when_mixed)
-    t = download.run(only=["NIUnderlyingDetail"], client=client())[0].tables[0]
+    t = download.run(only=["NIUnderlyingDetail"], sample="quick", client=client())[0].tables[0]
     assert download._status_word(t) == "ok"
     assert t.requests == 4 and t.requests_ok == 3  # the empty whole-table call, then A, Q, M
     freqs = {s["frequency"] for s in series_file("NIUnderlyingDetail", t.table)["series"]}
@@ -387,19 +387,19 @@ def test_empty_whole_table_is_retried_one_frequency_at_a_time(workdir, monkeypat
 
 
 def test_empty_table_is_fail_not_ok_and_old_files_go(workdir, monkeypatch):
-    download.run(only=["NIUnderlyingDetail"], client=client())
+    download.run(only=["NIUnderlyingDetail"], sample="quick", client=client())
     path = Path("data/corpus/NIUnderlyingDetail/series/U20305.json")
     assert path.exists()
     monkeypatch.setitem(globals(), "fake_get_data", lambda ds, q: {"Data": []})
-    t = download.run(only=["NIUnderlyingDetail"], client=client(), use_cache=False)[0].tables[0]
+    t = download.run(only=["NIUnderlyingDetail"], sample="quick", client=client(), use_cache=False)[0].tables[0]
     assert download._status_word(t) == "FAIL" and t.series == 0
     assert not path.exists()  # an old run's file doesn't pass for this run's result
     assert any(i["level"] == "error" and i["table"] == "U20305" for i in issues())
 
 
 def test_subset_run_keeps_the_other_datasets_in_the_reports(workdir):
-    download.run(only=["NIPA", "ITA"], client=client())
-    download.run(only=["ITA"], client=client())
+    download.run(only=["NIPA", "ITA"], sample="quick", client=client())
+    download.run(only=["ITA"], sample="quick", client=client())
     names = [d["dataset"] for d in json.loads(Path("reports/coverage.json").read_text())["datasets"]]
     assert sorted(names) == ["ITA", "NIPA"]
     assert "| NIPA |" in Path("reports/coverage.md").read_text()
@@ -409,3 +409,22 @@ def test_every_results_entry_is_kept():
     from bea_corpus.client import extract_results
     payload = {"BEAAPI": {"Results": [{"Statistic": "x", "Data": [{"a": 1}]}, {"Data": {"a": 2}}]}}
     assert extract_results(payload)["Data"] == [{"a": 1}, {"a": 2}]
+
+
+def test_default_is_every_table(workdir):
+    nipa = download.run(only=["NIPA"], client=client())[0]
+    assert len(nipa.tables) == len(TABLES["NIPA"])  # all 8, not a sample
+    mne = download.run(only=["MNE"], client=client())[0]
+    assert len(mne.tables) == 6  # every series ID, the hand-picked test list is ignored
+
+
+def test_sample_flags():
+    import argparse
+
+    from bea_corpus.cli import add_sample_flags
+    p = argparse.ArgumentParser()
+    add_sample_flags(p)
+    assert p.parse_args([]).sample is None                       # everything
+    assert p.parse_args(["--sample"]).sample == "quick"          # the config's small test set
+    assert p.parse_args(["--sample", "10"]).sample == 10
+    assert p.parse_args(["--sample-size", "1000"]).sample == 1000  # old command still works

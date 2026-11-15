@@ -1,7 +1,8 @@
 """One command to set everything up and download all 12 BEA datasets.
 
-    python run.py                    # install, then download (sample size 1000 = every table)
-    python run.py --sample-size 5    # quick test run, 5 tables per dataset
+    python run.py                    # install, then download everything
+    python run.py --sample           # quick test run, a few tables per dataset
+    python run.py --sample 10        # 10 tables per dataset
     python run.py --only NIPA MNE    # just some datasets
     python run.py --refresh          # ignore saved responses and ask BEA again
 
@@ -22,8 +23,6 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-
-SAMPLE_SIZE = 1000  # tables per dataset. Bigger than any dataset's table count, so this pulls every table.
 
 PROJECT = Path(__file__).resolve().parent / "macrocorpus-bea"
 ENV_FILE = PROJECT / ".env"
@@ -95,7 +94,9 @@ def download(extra_args: list[str]) -> int:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Install and download all BEA datasets in one go.")
-    p.add_argument("--sample-size", type=int, default=SAMPLE_SIZE, help=f"tables per dataset (default {SAMPLE_SIZE})")
+    p.add_argument("--sample", nargs="?", const="quick", metavar="N",
+                   help="test run instead of everything: a few tables per dataset, or N tables per dataset")
+    p.add_argument("--sample-size", dest="sample", help=argparse.SUPPRESS)  # old name, still works
     p.add_argument("--only", nargs="+", help="dataset names, e.g. NIPA Regional")
     p.add_argument("--refresh", action="store_true", help="ignore saved responses")
     p.add_argument("--skip-install", action="store_true", help="don't run pip install")
@@ -105,7 +106,7 @@ def main() -> None:
         install()
     ensure_key()
     preflight()
-    extra = ["--sample-size", str(args.sample_size)]
+    extra = [] if args.sample is None else ["--sample", str(args.sample)]
     if args.only:
         extra += ["--only", *args.only]
     if args.refresh:

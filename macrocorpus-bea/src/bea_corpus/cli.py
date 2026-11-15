@@ -7,7 +7,9 @@
     python -m bea_corpus profile                     # statistical profile of the corpus
 
   Main corpus download (all 12 datasets, standard JSON):
-    python -m bea_corpus                             # = download: dictionaries + all series in sampled tables
+    python -m bea_corpus                             # = download: every table and series of all 12 datasets
+    python -m bea_corpus download --sample           # quick test: a few tables per dataset
+    python -m bea_corpus download --sample 10        # 10 tables per dataset
     python -m bea_corpus download --only NIPA ITA    # just some datasets
     python -m bea_corpus standardize                 # rebuild JSON from raw files, no API calls
 """
@@ -113,8 +115,27 @@ def cmd_profile(args) -> None:
 
 def cmd_download(args) -> None:
     from .download import run
-    run(args.config, only=args.only, sample_size=args.sample_size, use_cache=not args.refresh,
+    run(args.config, only=args.only, sample=args.sample, use_cache=not args.refresh,
         client=BEAClient(cache_dir="data/raw/cache"))
+
+
+def sample_arg(value: str) -> int | str:
+    """--sample takes nothing (quick test set) or a number of tables per dataset."""
+    if value == "quick":
+        return value
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--sample takes a number, e.g. --sample 5") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError("--sample needs at least 1")
+    return n
+
+
+def add_sample_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--sample", nargs="?", const="quick", type=sample_arg, metavar="N",
+                        help="test run instead of everything: a few tables per dataset, or N tables per dataset")
+    parser.add_argument("--sample-size", dest="sample", type=sample_arg, help=argparse.SUPPRESS)  # old name
 
 
 def cmd_standardize(args) -> None:
@@ -149,10 +170,10 @@ def main(argv=None) -> None:
 
     sub.add_parser("profile", help="profile the fetched corpus").set_defaults(func=cmd_profile)
 
-    pd_ = sub.add_parser("download", help="(default) every dataset's dictionary + all series in sampled tables")
+    pd_ = sub.add_parser("download", help="(default) every dataset's dictionary + every series in every table")
     pd_.add_argument("--config", default="config/datasets.yaml")
     pd_.add_argument("--only", nargs="+", help="dataset names, e.g. NIPA Regional")
-    pd_.add_argument("--sample-size", type=int, help="tables per dataset (overrides the config)")
+    add_sample_flags(pd_)
     pd_.add_argument("--refresh", action="store_true", help="ignore cached responses")
     pd_.set_defaults(func=cmd_download)
 
