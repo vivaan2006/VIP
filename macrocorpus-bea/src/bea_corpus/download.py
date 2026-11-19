@@ -38,6 +38,7 @@ REPORTS = Path("reports")
 NOT_A_DATASET = {"apidatasetmetadata"}  # listed by GetDataSetList but holds no data
 YEAR_CHUNK = 10  # when a whole-table request comes back empty, years per smaller request
 SHAPE_MEMORY_DAYS = 60  # a shape BEA turned down is tried again after this long (BEA adds data in its releases)
+SHAPE_SAVE_EVERY = 20   # shapes between saves of the memory, so an interrupted series keeps most of what it learned
 
 
 @dataclass
@@ -123,6 +124,16 @@ def _read_dict(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def core_shape_test(cfg: dict, table: str):
+    """For datasets with extra request shapes: is a request one of the original ones? Used so that the
+    original shapes keep their series ids when an extra shape returns the same numbers."""
+    if not cfg.get("extra_request_shapes"):
+        return None
+    core = expand_shapes(cfg["request_shapes"], table)
+    return lambda request: any(all(request.get(k) == v for k, v in shape.items() if v is not None)
+                               and all(k not in request for k, v in shape.items() if v is None) for shape in core)
+
+
 def series_file_exists(dataset: str, table: str) -> bool:
     return (CORPUS / dataset / "series" / f"{safe_name(table)}.json").exists()
 
@@ -157,7 +168,7 @@ def expand_shapes(entries: list[dict], table: str) -> list[dict]:
         if only is not None and str(table) not in parse_ids(only):
             continue
         keys = list(entry)
-        options = [[str(x) for x in v] if isinstance(v, list) else [str(v)] for v in entry.values()]
+        options = [[_text(x) for x in v] if isinstance(v, list) else [_text(v)] for v in entry.values()]
         for combo in itertools.product(*options):
             shape = dict(zip(keys, combo))
             key = shape_key(shape)
@@ -165,6 +176,15 @@ def expand_shapes(entries: list[dict], table: str) -> list[dict]:
                 seen.add(key)
                 shapes.append(shape)
     return shapes
+
+
+def _text(value):
+    return None if value is None else str(value)  # null in the config = leave that parameter out
+
+
+def with_shape(params: dict, shape: dict) -> dict:
+    """The request for one shape: the table's params with the shape on top, null values left out."""
+    return {k: v for k, v in {**params, **shape}.items() if v is not None}
 
 
 def shape_key(shape: dict) -> str:
@@ -300,7 +320,7 @@ class Downloader:
         elif cfg.get("split_by"):
             responses = self._split(dataset, t, params, cfg["split_by"], self._split_values)
         elif cfg.get("request_shapes"):
-            responses = self._all_shapes(dataset, t, params, cfg["request_shapes"],
+            responses = self._all_shapes(dataset, t, params, cfg["request_shapes"] + cfg.get("extra_request_shapes", []),
                                          discontinued=parse_ids(cfg.get("discontinued", "")))
         else:
             responses = self._whole_table(dataset, t, params)
@@ -310,7 +330,8 @@ class Downloader:
 
         try:
             records, stats = table_to_series(responses, dataset, table, identity_params=cfg.get("identity_params"),
-                                             history_params=cfg.get("history_params"))
+                                             history_params=cfg.get("history_params"),
+                                             preferred=core_shape_test(cfg, table))
         except Exception as exc:  # one odd response shouldn't stop the whole run
             records, stats = [], {}
             self.log(dataset, table, "error", f"Couldn't turn BEA's response into series: {exc!r:.200}")
@@ -323,9 +344,13 @@ class Downloader:
             self.log(dataset, table, "error", "BEA answered but no data rows came back, even in smaller requests.")
         if t.unanswered and series_file_exists(dataset, table):
             # BEA didn't answer some requests, so this run's result may be missing series. Keep the last
-            # complete download instead of overwriting or deleting it; the next run tries again.
-            self.log(dataset, table, "warning", f"Kept the previous download of this table: BEA didn't answer "
-                                                f"{t.unanswered} request(s) this run.")
+            # complete download instead of overwriting or deleting it, and report what's on disk.
+            old = _read_dict(CORPUS / dataset / "series" / f"{safe_name(table)}.json").get("series", [])
+            t.series, t.observations = len(old), sum(r.get("n_obs", 0) for r in old)
+            t.empty_series = sum(1 for r in old if not r.get("n_obs"))
+            t.check += " (kept previous download)"
+            self.log(dataset, table, "warning", f"Kept the previous download of this table ({t.series} series): "
+                                                f"BEA didn't answer {t.unanswered} request(s) this run.")
             return t
         if t.empty_series:
             self.log(dataset, table, "info", f"{t.empty_series} of {t.series} series have no values at all "
@@ -408,13 +433,18 @@ class Downloader:
         if _has_rows(got):
             return [got]
         first_problem = self._last_error or "came back empty"
+        first_unanswered = self._last_transient
+        before = t.unanswered
         responses = self._pieces(dataset, t, params, stage=0)
+        if responses and first_unanswered and t.unanswered == before:  # the pieces covered it all
+            t.unanswered -= 1
         if responses:
             self.log(dataset, t.table, "info", f"Whole-table request {first_problem[:150]}; got the data in "
                                                f"{len(responses)} smaller requests instead.")
         else:
+            what = "got no answer either" if t.unanswered > before else "had no data either"
             self.log(dataset, t.table, "error", f"Whole-table request {first_problem[:200]}, and smaller requests "
-                                                "(one frequency / ten years at a time) had no data either.")
+                                                f"(one frequency / ten years at a time) {what}.")
         return responses
 
     def _pieces(self, dataset: str, t: TableResult, params: dict, stage: int) -> list[tuple[dict, dict]]:
@@ -480,15 +510,16 @@ class Downloader:
           logged and tried again on the next run.
         """
         shapes = expand_shapes(entries, t.table)
-        known = self._shape_memory(dataset).get(t.table, {})
+        known = self._shape_memory(dataset).get(t.table)
+        known = known if isinstance(known, dict) else {}
         today = date.today()
         fresh_after = (today - timedelta(days=SHAPE_MEMORY_DAYS)).isoformat()
         responses, results, refused, unanswered, skipped = [], [], [], [], 0
-        for shape in shapes:
-            request = {**params, **shape}
+        for n, shape in enumerate(shapes, 1):
+            request = with_shape(params, shape)
             key = shape_key(request)
             seen = known.get(key)
-            if self.use_cache and isinstance(seen, dict) and seen.get("checked", "") >= fresh_after:
+            if self.use_cache and isinstance(seen, dict) and str(seen.get("checked") or "") >= fresh_after:
                 skipped += 1
                 refused.append(seen.get("message", ""))
                 results.append({"shape": shape, "status": "skipped", "message": seen.get("message", "")})
@@ -508,6 +539,9 @@ class Downloader:
                 known[key] = {"message": message, "checked": today.isoformat()}
                 refused.append(message)
                 results.append({"shape": shape, "status": "no data", "message": message})
+            if n % SHAPE_SAVE_EVERY == 0 and known:
+                self._shape_memory(dataset)[t.table] = known
+                self._save_shapes(dataset, report=False)
         memory = self._shape_memory(dataset)
         if known:
             memory[t.table] = known
@@ -542,10 +576,10 @@ class Downloader:
         """The last report, so a run of a few tables (--sample) updates it instead of replacing it."""
         return _read_dict(REPORTS / f"shapes_{dataset}.json")
 
-    def _save_shapes(self, dataset: str) -> None:
+    def _save_shapes(self, dataset: str, report: bool = True) -> None:
         if dataset in self._shapes_known:
             _write_json(shape_memory_path(dataset), self._shapes_known[dataset])
-        if dataset in self._shape_report:
+        if report and dataset in self._shape_report:
             REPORTS.mkdir(exist_ok=True)
             _write_json(REPORTS / f"shapes_{dataset}.json", self._shape_report[dataset], indent=1)
 
@@ -556,6 +590,8 @@ class Downloader:
             lines = [key_of(v) for v in as_list(
                 self.client.get_parameter_values_filtered("Regional", "LineCode", TableName=table))]
         except BEAError as exc:
+            if is_transient(exc):
+                t.unanswered += 1  # keeps the last good download of this table
             self.log("Regional", table, "error", f"Could not list the table's lines: {exc}")
             return []
         lines = [ln for ln in dict.fromkeys(lines) if ln]
@@ -646,7 +682,7 @@ class Downloader:
             got = self._get(dataset, t, {**request, dim: value}, probe=True)  # BEA rejects some listed values
             if _has_rows(got):
                 responses.append(got)
-            else:
+            elif not self._last_transient:  # a no-answer is counted in t.unanswered, not as "no data"
                 still.append(value)
         return still
 
@@ -789,7 +825,8 @@ def restandardize(config_path: str | Path = "config/datasets.yaml") -> dict:
                 continue
             records, _ = table_to_series([(r["request"], r["results"]) for r in blob["responses"]],
                                          blob["dataset"], blob["table"], identity_params=identity,
-                                         history_params=history)
+                                         history_params=history,
+                                         preferred=core_shape_test(datasets.get(ds_dir.name, {}), blob["table"]))
             out = CORPUS / blob["dataset"] / "series" / raw.name
             old = json.loads(out.read_text()) if out.exists() else {}
             _write_json(out, {**old, "dataset": blob["dataset"], "table": blob["table"],

@@ -40,15 +40,18 @@ TRANSIENT_HTTP = {403, 408, 425, 429}  # plus every 5xx
 # BEA usually answers a bad request with a JSON error at HTTP 200. These phrases mean "not now"
 # rather than "no such data", so the request is worth trying again later.
 # Kept narrow on purpose: a word like "unavailable" can also mean "no data for this selection".
-TRANSIENT_WORDS = ("too many requests", "rate limit", "limit exceeded", "try again", "temporarily",
-                   "timed out", "timeout", "throttl", "server busy", "locked out")
+TRANSIENT_WORDS = ("too many requests", "rate limit", "limit exceeded", "quota", "request denied", "try again",
+                   "temporarily", "timed out", "timeout", "throttl", "server busy", "locked out")
+THROTTLE_CODE = "[7] "  # BEA's "Request Denied - exceeded Requests per minute quota."
 
 
 def is_transient(exc: Exception) -> bool:
     """True if a failed call says nothing about whether the data exists (worth retrying later)."""
-    if isinstance(exc, BEATransientError) or isinstance(exc, (requests.RequestException, OSError)):
+    if isinstance(exc, (BEATransientError, requests.RequestException, ConnectionError, TimeoutError)):
         return True
-    return isinstance(exc, BEAError) and any(w in str(exc).lower() for w in TRANSIENT_WORDS)
+    text = str(exc)
+    return isinstance(exc, BEAError) and (text.startswith(THROTTLE_CODE)
+                                          or any(w in text.lower() for w in TRANSIENT_WORDS))
 
 
 class BEAClient:
@@ -186,7 +189,7 @@ class BEAClient:
                 return json.loads(text)
             except ValueError:
                 raise BEATransientError(f"BEA sent something that isn't JSON: {text[:150]!r}") from None
-        raise BEATransientError("Gave up after repeated throttling (HTTP 429).")
+        raise AssertionError("unreachable: the last attempt always returns or raises")
 
     def _hide_key(self, exc: Exception) -> str:
         """Error text with the API key taken out (requests puts the whole URL in its messages)."""

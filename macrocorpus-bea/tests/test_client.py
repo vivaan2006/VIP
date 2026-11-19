@@ -151,3 +151,10 @@ def test_damaged_cache_file_is_fetched_again(monkeypatch, tmp_path):
     cached.write_text('{"BEAAPI": {"Res')                      # cut off mid-write
     assert c.get_data("MNE", SeriesID="4")["Data"] == [{"a": 1}]
     assert json.loads(cached.read_text())                      # and the file is whole again
+
+
+def test_bea_throttle_code_is_no_answer():
+    from bea_corpus.client import BEAError, is_transient
+    assert is_transient(BEAError("[7] Request Denied - exceeded Requests per minute quota."))
+    assert not is_transient(BEAError("[1] no data found"))
+    assert not is_transient(BEAError("[40] The dataset requested requires parameters that were missing"))

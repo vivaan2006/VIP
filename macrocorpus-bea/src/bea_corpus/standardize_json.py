@@ -20,6 +20,8 @@ Output record (see schema/series.schema.json and docs/json_format.md):
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import hashlib
 import re
 from collections import Counter, defaultdict
@@ -156,7 +158,8 @@ def to_series(results: dict, dataset: str, table: str, request: dict | None = No
 def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str,
                     retrieved: date | None = None,
                     identity_params: list[str] | None = None,
-                    history_params: list[str] | None = None) -> tuple[list[dict], dict]:
+                    history_params: list[str] | None = None,
+                    preferred: Callable[[dict], bool] | None = None) -> tuple[list[dict], dict]:
     """Convert every response for one table into standard series records.
 
     All responses are merged first, so a series that shows up in two requests (state totals in both
@@ -174,6 +177,10 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
       - `history_params` are request settings that DON'T split a series but mark a change in what it
         covers (MNE's NonbankAffiliatesOnly: older years are nonbank affiliates only). When a series
         mixes values, every change is listed in `definition_history`, with the dates each value covers.
+        If two settings both have a date, the one from the earlier request is kept for that date.
+      - `preferred(request)`: when identical numbers come back under several breakdowns (merge_identical),
+        a series from a preferred request keeps its id over one that isn't (MNE: the original shapes
+        win over shapes added later, so adding shapes never changes an existing id).
       - two rows with the same codes, labels and date: equal numbers are a harmless repeat;
         different numbers are a conflict. The first is kept and the conflict is counted, never hidden.
 
@@ -216,8 +223,19 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
         groups[codes + (freq,)].append((d, labels, v, code, r, i))
 
     # 2. split a code group by label only where labels mark different measures
+    def setting(i: int) -> tuple:
+        return tuple(str(responses[i][0].get(p, "")) for p in history_params or [])
+
     series_groups: list[tuple[tuple, tuple | None, list]] = []
     for key, items in groups.items():
+        if history_params:  # a date downloaded under two settings: keep the earlier request's setting only
+            first_setting = {}
+            for it in sorted(items, key=lambda it: it[5]):
+                first_setting.setdefault(it[0], setting(it[5]))
+            kept = [it for it in items if setting(it[5]) == first_setting[it[0]]]
+            if len(kept) < len(items):
+                stats["history_overlap"] += 1
+            items = kept
         by_date: dict[str, dict[tuple, float | None]] = defaultdict(dict)
         for d, labels, v, *_ in items:
             by_date[d].setdefault(labels, v)
@@ -332,10 +350,14 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
             record["label_history"] = history
         if len(definitions) > 1:
             record["definition_history"] = definitions
+        if preferred is not None:
+            record["_rank"] = 0 if any(preferred(responses[it[5]][0]) for it in items) else 1
         if len(units_seen) > 1:
             record["unit_history"] = [{"unit": u, "unit_multiplier": m} for u, m in units_seen]
         records.append(record)
     records, merged = merge_identical(records)
+    for r in records:
+        r.pop("_rank", None)
     if merged:
         stats["identical_merged"] = merged
     stats["series"] = len(records)
@@ -353,7 +375,8 @@ def merge_identical(records: list[dict]) -> tuple[list[dict], int]:
 
     The same numbers often come back under two breakdowns of one table (MNE's by-country view and its
     country-by-industry view both carry each country's all-industries total). One record is kept, the one
-    with the smallest id so it's the same every run, and every other breakdown it appeared under is listed
+    with the smallest id so it's the same every run (series from preferred requests first, see
+    table_to_series), and every other breakdown it appeared under is listed
     in `also_as`, so nothing is lost.
 
     Only merged when frequency, dates, values and units all match, there are at least MIN_OBS_TO_MERGE
@@ -371,7 +394,7 @@ def merge_identical(records: list[dict]) -> tuple[list[dict], int]:
         groups[key].append(r)
     out, merged = list(keep_as_is), 0
     for same in groups.values():
-        same.sort(key=lambda r: r["series_id"])
+        same.sort(key=lambda r: (r.get("_rank", 0), r["series_id"]))
         kept = same[0]
         if len(same) > 1:
             kept["also_as"] = [{"series_id": r["series_id"], "title": r["title"], "dimensions": r["dimensions"]}

@@ -82,7 +82,8 @@ datasets:
     discontinued: "11, 13, 16, 19, 50-52, 55, 56"
     #
     # A list means "each of these": {DirectionOfInvestment: [outward, inward], Classification: [Country, Industry]}
-    # is 4 shapes. `series` limits an entry to some series IDs. Shapes BEA turns down are remembered in
+    # is 4 shapes. `series` limits an entry to some series IDs, and null leaves a parameter out.
+    # Shapes BEA turns down are remembered in
     # data/raw/cache/shapes_MNE.json for 60 days and skipped (--refresh tries them all again), and every
     # shape's result is in reports/shapes_MNE.json.
     #
@@ -91,8 +92,7 @@ datasets:
     # Activities of multinationals (AMNE, 1-21 and 46-61) need OwnershipLevel (0 = majority-owned, 1 = all
     # affiliates) and NonbankAffiliatesOnly: 1 for outward/parent years up to 2008 and inward up to 2006,
     # 0 after (BEA API guide, MNE appendix). Direct investment (22-44) and new FDI (62-69) take neither.
-    request_shapes:
-      # --- the original 25, still tried for every series so nothing that worked before is lost ---
+    request_shapes:            # the original 25, tried first for every series
       - {DirectionOfInvestment: outward, Classification: [Country, Industry, CountryByIndustry]}
       - {DirectionOfInvestment: inward,
          Classification: [Country, Industry, CountryByIndustry, CountryofUBO, CountryofUBObyIndustry,
@@ -103,17 +103,30 @@ datasets:
       - {DirectionOfInvestment: state, Classification: StatebyCountryofUBO, OwnershipLevel: ["0", "1"],
          NonbankAffiliatesOnly: "0"}
 
+    # Tried after the original 25, only for the series they apply to. If one returns exactly the same
+    # numbers as an original shape, the original keeps its series id (the extra is listed under also_as).
+    # Classifications are limited to the series their description in BEA's dictionary covers.
+    extra_request_shapes:
       # --- direct investment and new FDI ---
       - {series: "25, 27, 30-35, 39, 40", DirectionOfInvestment: outward, Classification: IndustryByCountry}
       - {series: "22-29, 41-44", DirectionOfInvestment: inward,
          Classification: [IndustryByCountry, IndustrybyCountryofUBO]}
-      - {series: "62-69", DirectionOfInvestment: inward, Classification: [IndustrybyType, StatebyType, TypeofExpenditure]}
+      - {series: "62, 64, 66, 68, 69", DirectionOfInvestment: inward, Classification: [IndustrybyType, StatebyType]}
+      - {series: "62", DirectionOfInvestment: inward, Classification: TypeofExpenditure}   # investment expenditures
+
+      # --- goods and services supplied (58, 60, 61) ---
+      # exactly the call BEA's own well-being code makes for 58 and 60 (Country 000 = all-countries total)
+      - {series: "58, 60, 61", DirectionOfInvestment: outward, Classification: CountryByDestination, Country: "000",
+         OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
+      - {series: "58, 60, 61", DirectionOfInvestment: outward, Classification: [CountryByDestination, IndustryByDestination],
+         OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "0"}
+      - {series: "58, 60", DirectionOfInvestment: inward, Classification: [CountryofUBObyDestination, IndustryByDestination],
+         OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
 
       # --- AMNE outward (U.S. parents' foreign affiliates) ---
       - {series: "1, 3-8, 10, 12, 14, 54, 58, 60, 61", DirectionOfInvestment: outward, OwnershipLevel: ["0", "1"],
          NonbankAffiliatesOnly: "0",
-         Classification: [IndustryByCountry, CountryByDestination, IndustryByDestination, IndustryofUSParent,
-                          IndustryofUSParentAllIndustries, IndustryofUSParentByCountry]}
+         Classification: [IndustryByCountry, IndustryofUSParent, IndustryofUSParentAllIndustries, IndustryofUSParentByCountry]}
       - {series: "1, 3-8, 10, 12, 14, 54, 58, 60, 61", DirectionOfInvestment: outward, OwnershipLevel: ["0", "1"],
          NonbankAffiliatesOnly: "1",
          Classification: [Country, Industry, CountryByIndustry, IndustryByCountry, IndustryofUSParent,
@@ -122,23 +135,25 @@ datasets:
       # --- AMNE inward (U.S. affiliates of foreign companies) ---
       - {series: "1, 2, 4-8, 10, 12, 14, 53", DirectionOfInvestment: inward, OwnershipLevel: ["0", "1"],
          NonbankAffiliatesOnly: "0",
-         Classification: [IndustryByCountry, CountryofUBO, CountryofUBObyIndustry, IndustrybyCountryofUBO,
-                          CountryofUBObyDestination, IndustryByDestination]}
+         Classification: [IndustryByCountry, CountryofUBO, CountryofUBObyIndustry, IndustrybyCountryofUBO]}
       - {series: "1, 2, 4-8, 10, 12, 14, 53", DirectionOfInvestment: inward, OwnershipLevel: ["0", "1"],
          NonbankAffiliatesOnly: "1",
          Classification: [Country, Industry, CountryByIndustry, IndustryByCountry, CountryofUBO,
                           CountryofUBObyIndustry, IndustrybyCountryofUBO]}
-      - {series: "1, 2, 4-8, 10, 12, 14, 53", DirectionOfInvestment: inward, Classification: IndustryofSales,
-         OwnershipLevel: "0", NonbankAffiliatesOnly: ["0", "1"]}   # majority-owned affiliates only
+      # "employment and sales for majority-owned U.S. affiliates" = series 4 and 8, majority-owned only
+      - {series: "4, 8", DirectionOfInvestment: inward, Classification: IndustryofSales, OwnershipLevel: "0",
+         NonbankAffiliatesOnly: ["0", "1"]}
 
       # --- AMNE parents and states ---
       - {series: "1, 3-8, 14, 20, 21, 46-48, 57", DirectionOfInvestment: parent, Classification: Industry,
          OwnershipLevel: "1", NonbankAffiliatesOnly: "1"}
+      # gross PPE (2) by state is published before 2007 per BEA's dictionary, so it's in the state group too
       - {series: "2, 8, 9", DirectionOfInvestment: state, Classification: StatebyCountryofUBO,
          OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "1"}
-      # 9 (manufacturing employment) failed with every state shape above: BEA says it needs this classification
-      # "even though no country data are provided", so also ask for the all-countries total only.
-      - {series: "8, 9", DirectionOfInvestment: state, Classification: StatebyCountryofUBO, Country: "000",
+      # 9 (manufacturing employment) came back empty with every state shape in the original 25. BEA's note says
+      # it needs this classification "even though no country data are provided", so guess: all-countries total
+      # only (Country 000), or no Country at all (null = leave it out). Not confirmed by any BEA example.
+      - {series: "8, 9", DirectionOfInvestment: state, Classification: StatebyCountryofUBO, Country: ["000", null],
          OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: ["0", "1"]}
 
       # --- discontinued series: only their older (nonbank-only) years could still be there ---
