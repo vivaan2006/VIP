@@ -158,3 +158,9 @@ def test_bea_throttle_code_is_no_answer():
     assert is_transient(BEAError("[7] Request Denied - exceeded Requests per minute quota."))
     assert not is_transient(BEAError("[1] no data found"))
     assert not is_transient(BEAError("[40] The dataset requested requires parameters that were missing"))
+
+
+def test_transient_words_stay_narrow():
+    from bea_corpus.client import BEAError, is_transient
+    assert is_transient(BEAError("Request Denied - exceeded Requests per minute quota."))   # even without the code
+    assert not is_transient(BEAError("[45] Data size limit exceeded, please narrow your request"))

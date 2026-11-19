@@ -412,3 +412,98 @@ def test_one_by_one_no_answer_is_not_no_data():
     t = download.TableResult("BalGds", "")
     still = d._ask_one_by_one("ITA", t, {}, "AreaOrCountry", ["China", "Japan", "Narnia"], [])
     assert still == ["Narnia"] and t.unanswered == 1
+
+
+# ---------- final review ----------
+
+@pytest.mark.parametrize("original, extra", [
+    ({"DirectionOfInvestment": "inward", "Classification": "CountryofUBO"},           # extra = original + ownership
+     {"DirectionOfInvestment": "inward", "Classification": "CountryofUBO", "OwnershipLevel": "0",
+      "NonbankAffiliatesOnly": "0"}),
+    ({"DirectionOfInvestment": "outward", "Classification": "Country", "OwnershipLevel": "0",
+      "NonbankAffiliatesOnly": "0"},                                                     # same id, other setting
+     {"DirectionOfInvestment": "outward", "Classification": "Country", "OwnershipLevel": "0",
+      "NonbankAffiliatesOnly": "1"}),
+])
+def test_only_an_exact_original_counts_as_original(original, extra):
+    test = download.core_shape_test(MNE_CFG, "4")
+    params = {"SeriesID": "4", **BASE}
+    assert test(download.with_shape(params, original)) and not test(download.with_shape(params, extra))
+
+
+def test_original_without_ownership_keeps_its_id_over_extra_with_it():
+    original = {"DirectionOfInvestment": "inward", "Classification": "CountryofUBO"}
+    extra = {**original, "OwnershipLevel": "0", "NonbankAffiliatesOnly": "0"}     # ".CountryofUBO.0." < ".CountryofUBO.A"
+    rows = [row(y, value=str(1000 + y)) for y in range(2009, 2014)]
+    run_table(FakeBEA([(original, rows), (extra, rows)]))
+    series = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"]
+    assert len(series) == 1 and series[0]["series_id"].endswith(".inward.CountryofUBO.A")
+
+
+def test_country_000_and_no_country_are_not_the_original_state_shape():
+    test = download.core_shape_test(MNE_CFG, "9")
+    params = {"SeriesID": "9", **BASE}
+    original = {"DirectionOfInvestment": "state", "Classification": "StatebyCountryofUBO", "OwnershipLevel": "0",
+                "NonbankAffiliatesOnly": "0"}
+    assert test(download.with_shape(params, original))
+    assert not test(download.with_shape(params, {**original, "Country": "000"}))
+    assert not test(download.with_shape(params, {**original, "Country": None}))
+
+
+def test_a_more_complete_result_is_written_even_if_something_got_no_answer():
+    run_table(FakeBEA([(NEW_YEARS, [row(y) for y in range(2009, 2013)])]))
+    unrelated = {"DirectionOfInvestment": "inward", "Classification": "Country"}
+    fake = FakeBEA([(NEW_YEARS, [row(y) for y in range(2009, 2013)]), (OLD_YEARS, [row(y) for y in range(2000, 2009)])],
+                   flaky=[unrelated])
+    d, t = run_table(fake, use_cache=False)
+    series = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"]
+    assert series[0]["start"] == "2000-01-01"            # the new, fuller history was written
+    assert download._status_word(t) == "partial" and "kept previous" not in t.check
+
+
+def test_series_9_newer_setting_wins_on_overlap():
+    state_old = {"DirectionOfInvestment": "state", "Classification": "StatebyCountryofUBO", "OwnershipLevel": "0",
+                 "NonbankAffiliatesOnly": "1"}
+    guess_new = {**state_old, "NonbankAffiliatesOnly": "0", "Country": "000"}
+    fake = FakeBEA([(state_old, [row(y, value="1", series="9") for y in range(2000, 2008)]),
+                    (guess_new, [row(y, value="2", series="9") for y in range(2007, 2013)])])
+    run_table(fake, table="9")
+    s = json.loads(Path("data/corpus/MNE/series/9.json").read_text())["series"][0]
+    assert s["values"][s["dates"].index("2007-01-01")] == 2.0
+    assert s["definition_history"][-1]["settings"]["NonbankAffiliatesOnly"] == "0"
+    assert s["definition_history"][-1]["from"] == "2007-01-01"
+
+
+def test_shapes_no_longer_in_the_config_are_forgotten():
+    path = download.shape_memory_path("MNE")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"4": {"{\"gone\": \"shape\"}": {"message": "x", "checked": date.today().isoformat()}}}))
+    run_table(FakeBEA([(NEW_YEARS, [row(2010)])]))
+    assert "{\"gone\": \"shape\"}" not in memory()
+
+
+class AllDown(FakeBEA):
+    def get_data(self, *a, **k):
+        raise BEATransientError("Network problem, gave up after 4 tries")
+
+    def get_parameter_values_filtered(self, *a, **k):
+        return [{"Key": str(i)} for i in range(1, 30)]
+
+
+def test_an_outage_gives_a_few_warnings_not_thousands():
+    d = download.Downloader(AllDown(), {"datasets": {}})
+    d.download_table("Regional", {"table_param": "TableName"}, "CAINC1", "", {"TableName": "CAINC1"})
+    assert len(d.issues) <= 3 and any("didn't answer for any geography" in i.issue for i in d.issues)
+
+
+class CheckDown(FakeBEA):
+    def get_parameter_values_filtered(self, *a, **k):
+        raise BEATransientError("Network problem")
+
+
+def test_no_answer_when_checking_against_the_dictionary_is_not_info():
+    d = download.Downloader(CheckDown(), {"datasets": {}})
+    t = download.TableResult("BalGds", "")
+    d._check_against_dictionary("ITA", {"check": "AreaOrCountry", "table_param": "Indicator"}, "BalGds", t,
+                                [({}, {"Data": [{"AreaOrCountry": "China"}]})])
+    assert t.unanswered == 1 and [i.level for i in d.issues] == ["warning"]

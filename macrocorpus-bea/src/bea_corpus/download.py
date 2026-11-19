@@ -63,6 +63,7 @@ class TableResult:
     expected: int | None = None
     missing: list[str] = field(default_factory=list)
     unanswered: int = 0  # requests BEA never really answered (network, throttling): we don't know what's there
+    unanswered_summed_up: bool = False  # a warning already gives the total
 
 
 @dataclass
@@ -125,13 +126,25 @@ def _read_dict(path: Path) -> dict:
 
 
 def core_shape_test(cfg: dict, table: str):
-    """For datasets with extra request shapes: is a request one of the original ones? Used so that the
-    original shapes keep their series ids when an extra shape returns the same numbers."""
+    """For datasets with extra request shapes: is a request EXACTLY one of the original ones? Used so that
+    the original shapes keep their series ids when an extra shape returns the same numbers.
+
+    Every parameter any shape sets is compared. One an original shape doesn't set must be absent from the
+    request, or equal to the table's own value (config `params`, e.g. Country: all). So an extra that is an
+    original plus OwnershipLevel, or with Country 000, is not mistaken for that original.
+    """
     if not cfg.get("extra_request_shapes"):
         return None
     core = expand_shapes(cfg["request_shapes"], table)
-    return lambda request: any(all(request.get(k) == v for k, v in shape.items() if v is not None)
-                               and all(k not in request for k, v in shape.items() if v is None) for shape in core)
+    every = core + expand_shapes(cfg["extra_request_shapes"], table)
+    keys = sorted({k for shape in every for k in shape})
+    base = {k: str(v) for k, v in (cfg.get("params") or {}).items()}
+
+    def view(request: dict) -> tuple:
+        return tuple(str(request[k]) if k in request else None for k in keys)
+
+    originals = {tuple(shape[k] if k in shape else base.get(k) for k in keys) for shape in core}
+    return lambda request: view(request) in originals
 
 
 def series_file_exists(dataset: str, table: str) -> bool:
@@ -342,10 +355,15 @@ class Downloader:
 
         if responses and not records:
             self.log(dataset, table, "error", "BEA answered but no data rows came back, even in smaller requests.")
-        if t.unanswered and series_file_exists(dataset, table):
-            # BEA didn't answer some requests, so this run's result may be missing series. Keep the last
-            # complete download instead of overwriting or deleting it, and report what's on disk.
-            old = _read_dict(CORPUS / dataset / "series" / f"{safe_name(table)}.json").get("series", [])
+        if t.unanswered > 1 and not t.unanswered_summed_up:
+            self.log(dataset, table, "warning", f"{t.unanswered} requests for this table got no answer from BEA "
+                                                "in total; rerun to try them again.")
+        old = _read_dict(CORPUS / dataset / "series" / f"{safe_name(table)}.json").get("series", []) \
+            if t.unanswered and series_file_exists(dataset, table) else []
+        if old and not {r.get("series_id") for r in old} <= {r["series_id"] for r in records}:
+            # BEA didn't answer some requests and this run is missing series the last download had. Keep the
+            # last download instead of overwriting or deleting it, and report what's on disk. (If this run has
+            # every series the old file had, it's written as usual: it can only be more complete.)
             t.series, t.observations = len(old), sum(r.get("n_obs", 0) for r in old)
             t.empty_series = sum(1 for r in old if not r.get("n_obs"))
             t.check += " (kept previous download)"
@@ -388,6 +406,9 @@ class Downloader:
             self.log(dataset, table, "info", f"{stats['definition_changes']} series join years downloaded with "
                                              "different settings (e.g. nonbank affiliates only in older years); "
                                              "see definition_history.")
+        if stats.get("history_overlap"):
+            self.log(dataset, table, "info", f"{stats['history_overlap']} series had years downloaded under two "
+                                             "settings; kept the setting asked for first (see config order).")
         if stats.get("unit_changes"):
             self.log(dataset, table, "warning", f"{stats['unit_changes']} series change units partway through; "
                                                 "see unit_history.")
@@ -416,7 +437,7 @@ class Downloader:
                 self.log(dataset, t.table, "error", f"Unexpected error for {_short(request)}: {exc!r:.200}")
             elif not probe:
                 self.log(dataset, t.table, "error", f"GetData failed for {_short(request)}: {str(exc)[:200]}")
-            elif self._last_transient and log_transient:
+            elif self._last_transient and log_transient and t.unanswered == 1:  # the rest are summed up later
                 self.log(dataset, t.table, "warning", f"BEA didn't answer for {_short(request)} "
                                                       f"({str(exc)[:150]}); rerun to try it again.")
             return None
@@ -442,9 +463,13 @@ class Downloader:
             self.log(dataset, t.table, "info", f"Whole-table request {first_problem[:150]}; got the data in "
                                                f"{len(responses)} smaller requests instead.")
         else:
-            what = "got no answer either" if t.unanswered > before else "had no data either"
-            self.log(dataset, t.table, "error", f"Whole-table request {first_problem[:200]}, and smaller requests "
-                                                f"(one frequency / ten years at a time) {what}.")
+            if first_unanswered and t.unanswered == before:  # no smaller requests were possible
+                self.log(dataset, t.table, "error", f"BEA didn't answer the whole-table request ({first_problem[:200]}); "
+                                                    "rerun to try it again.")
+            else:
+                what = "got no answer either" if t.unanswered > before else "had no data either"
+                self.log(dataset, t.table, "error", f"Whole-table request {first_problem[:200]}, and smaller requests "
+                                                    f"(one frequency / ten years at a time) {what}.")
         return responses
 
     def _pieces(self, dataset: str, t: TableResult, params: dict, stage: int) -> list[tuple[dict, dict]]:
@@ -482,6 +507,7 @@ class Downloader:
                 unanswered.append(value)
             else:
                 t.missing.append(value)
+        t.unanswered_summed_up = True
         if unanswered:
             self.log(dataset, t.table, "warning" if responses else "error",
                      f"BEA didn't answer for {len(unanswered)} of {len(split_values)} {dim} values "
@@ -512,6 +538,8 @@ class Downloader:
         shapes = expand_shapes(entries, t.table)
         known = self._shape_memory(dataset).get(t.table)
         known = known if isinstance(known, dict) else {}
+        current = {shape_key(with_shape(params, shape)) for shape in shapes}
+        known = {k: v for k, v in known.items() if k in current}  # drop shapes no longer in the config
         today = date.today()
         fresh_after = (today - timedelta(days=SHAPE_MEMORY_DAYS)).isoformat()
         responses, results, refused, unanswered, skipped = [], [], [], [], 0
@@ -551,6 +579,7 @@ class Downloader:
         self._save_shapes(dataset)
 
         t.check = f"{len(shapes)} request shapes" + (f", {skipped} known-empty skipped" if skipped else "")
+        t.unanswered_summed_up = True
         if unanswered:
             t.check += f", {len(unanswered)} got no answer"
             self.log(dataset, t.table, "warning" if responses else "error",
@@ -574,7 +603,7 @@ class Downloader:
 
     def _old_shape_report(self, dataset: str) -> dict:
         """The last report, so a run of a few tables (--sample) updates it instead of replacing it."""
-        return _read_dict(REPORTS / f"shapes_{dataset}.json")
+        return self._shape_report.get(dataset) or _read_dict(REPORTS / f"shapes_{dataset}.json")
 
     def _save_shapes(self, dataset: str, report: bool = True) -> None:
         if dataset in self._shapes_known:
@@ -621,8 +650,12 @@ class Downloader:
                 working, responses = [REGIONAL_LAST_RESORT], [got]
         if not working:
             t.missing = lines
-            self.log("Regional", table, "error", f"No geography level ({', '.join(candidates)}) returned data "
-                                                 "for the table's first lines.")
+            if t.unanswered:
+                self.log("Regional", table, "error", f"BEA didn't answer for any geography level "
+                                                     f"({', '.join(candidates)}); rerun to try again.")
+            else:
+                self.log("Regional", table, "error", f"No geography level ({', '.join(candidates)}) returned data "
+                                                     "for the table's first lines.")
             return []
         t.check = f"every line in the dictionary, at {', '.join(working)}"
         done = {(r["LineCode"], r["GeoFips"]) for r, _ in responses}
@@ -658,8 +691,13 @@ class Downloader:
             listed = {key_of(v) for v in as_list(self.client.get_parameter_values_filtered(
                 dataset, dim, **{cfg["table_param"]: table}))}
         except BEAError as exc:
-            self.log(dataset, table, "info", f"BEA can't list {dim} per table here ({str(exc)[:120]}); "
-                                             "checked as a whole-table call instead.")
+            if is_transient(exc):
+                t.unanswered += 1
+                self.log(dataset, table, "warning", f"BEA didn't answer when asked which {dim} values this table "
+                                                    f"has ({str(exc)[:120]}); couldn't check it, rerun to try again.")
+            else:
+                self.log(dataset, table, "info", f"BEA can't list {dim} per table here ({str(exc)[:120]}); "
+                                                 "checked as a whole-table call instead.")
             return
         found = {str(row.get(dim, "")).strip() for _, res in responses for row in as_list(res.get("Data"))}
         t.check, t.expected = f"every {dim} in the dictionary", len(listed)

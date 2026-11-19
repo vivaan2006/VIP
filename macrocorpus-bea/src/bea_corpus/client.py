@@ -40,8 +40,8 @@ TRANSIENT_HTTP = {403, 408, 425, 429}  # plus every 5xx
 # BEA usually answers a bad request with a JSON error at HTTP 200. These phrases mean "not now"
 # rather than "no such data", so the request is worth trying again later.
 # Kept narrow on purpose: a word like "unavailable" can also mean "no data for this selection".
-TRANSIENT_WORDS = ("too many requests", "rate limit", "limit exceeded", "quota", "request denied", "try again",
-                   "temporarily", "timed out", "timeout", "throttl", "server busy", "locked out")
+TRANSIENT_WORDS = ("too many requests", "rate limit", "requests per minute", "try again", "temporarily",
+                   "timed out", "timeout", "throttl", "server busy", "locked out")
 THROTTLE_CODE = "[7] "  # BEA's "Request Denied - exceeded Requests per minute quota."
 
 

@@ -11,7 +11,7 @@ So the same recipe works for all of them: group rows by their dimension columns,
 sort by date, and write one JSON record per group. No per-dataset parsing code needed;
 anything new BEA adds is picked up automatically.
 
-Output record (see schema/series.schema.json and docs/json_format.md):
+Output record (see schema/series.schema.json and schema/series.schema.json):
 {"series_id", "source", "country", "dataset", "table", "table_title", "title",
  "frequency", "unit", "unit_multiplier", "metric", "dimensions",
  "start", "end", "n_obs", "n_missing", "missing_codes", "retrieved", "request",
