@@ -60,3 +60,38 @@ def test_network_errors_retry_then_become_bea_errors(monkeypatch, tmp_path):
     except BEAError as exc:
         assert "secret-key-123" not in str(exc) and "<key>" in str(exc)
     assert len(calls) == 3  # first try + 2 retries
+
+
+def test_no_answer_and_no_data_are_different_errors(monkeypatch, tmp_path):
+    import requests
+
+    from bea_corpus.client import BEAClient, BEAError, BEATransientError
+
+    class Resp:
+        def __init__(self, status, body=b"{}"):
+            self.status_code, self.content, self.headers = status, body, {}
+
+    def client_answering(resp):
+        c = BEAClient(api_key="k", cache_dir=tmp_path, min_interval=0, network_pause=0, max_retries=1,
+                      error_pause=0)
+        monkeypatch.setattr(c._session, "get", resp)
+        return c
+
+    def raised(c):
+        try:
+            c.get_data("MNE", SeriesID="16")
+        except BEAError as exc:
+            return exc
+        raise AssertionError("should have raised")
+
+    def dropped(*a, **k):
+        raise requests.ConnectionError("reset")
+
+    assert isinstance(raised(client_answering(dropped)), BEATransientError)
+    assert isinstance(raised(client_answering(lambda *a, **k: Resp(503))), BEATransientError)
+    assert isinstance(raised(client_answering(lambda *a, **k: Resp(200, b"<html>busy</html>"))), BEATransientError)
+    not_found = raised(client_answering(lambda *a, **k: Resp(400)))
+    assert not isinstance(not_found, BEATransientError)
+    refused = raised(client_answering(lambda *a, **k: Resp(200, b'{"BEAAPI": {"Results": {"Error": '
+                                                             b'{"APIErrorDescription": "Invalid combination"}}}}')))
+    assert not isinstance(refused, BEATransientError) and "Invalid combination" in str(refused)

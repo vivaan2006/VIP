@@ -75,35 +75,52 @@ datasets:
     params: {Country: all, Year: ALL}   # that returns data is kept.
     tables: ["30", "31", "27", "25", "33"]   # only for a quick --sample run
     identity_params: [DirectionOfInvestment, Classification, OwnershipLevel]  # part of each series' id
+    # A list means "each of these": {DirectionOfInvestment: [outward, inward], Classification: [Country, Industry]}
+    # is 4 shapes. `series` limits an entry to some series IDs. Shapes BEA turns down are remembered in
+    # data/raw/cache/shapes_MNE.json and skipped on the next run (--refresh tries them all again), and every
+    # shape's result is in reports/shapes_MNE.json.
+    #
+    # Series groups (BEA API guide, MNE appendix):
+    #   direct investment (DI) 22-44, new foreign direct investment (BE-13 survey) 62-69: no ownership level
+    #   activities of multinationals (AMNE) 1-21, 46-61: OwnershipLevel (0 = majority-owned, 1 = all affiliates)
+    #     and NonbankAffiliatesOnly are required. NonbankAffiliatesOnly is 1 for outward years up to 2008 and
+    #     inward years up to 2006, 0 after, so both are tried. They describe the same series, so they are NOT
+    #     in identity_params: the old (nonbank-only) and new (bank and nonbank) years join into one history.
+    #     Parents need OwnershipLevel 1.
     request_shapes:
-      # direct investment series (22-44, 62-69): no ownership level
-      - {DirectionOfInvestment: outward, Classification: Country}
-      - {DirectionOfInvestment: outward, Classification: Industry}
-      - {DirectionOfInvestment: outward, Classification: CountryByIndustry}
-      - {DirectionOfInvestment: inward, Classification: Country}
-      - {DirectionOfInvestment: inward, Classification: Industry}
-      - {DirectionOfInvestment: inward, Classification: CountryByIndustry}
-      - {DirectionOfInvestment: inward, Classification: CountryofUBO}
-      - {DirectionOfInvestment: inward, Classification: CountryofUBObyIndustry}
-      - {DirectionOfInvestment: inward, Classification: CountrybyType}
-      - {DirectionOfInvestment: inward, Classification: CountryofUBObyType}
-      # operations of multinationals (AMNE, 1-21 and 46-61). 0 = majority-owned affiliates, 1 = all affiliates.
-      # NonbankAffiliatesOnly 0 is what BEA requires for recent years. Parents must use OwnershipLevel 1.
-      - {DirectionOfInvestment: outward, Classification: Country, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: outward, Classification: Country, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: outward, Classification: Industry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: outward, Classification: Industry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: outward, Classification: CountryByIndustry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: outward, Classification: CountryByIndustry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: inward, Classification: Country, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: inward, Classification: Country, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: inward, Classification: Industry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: inward, Classification: Industry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: inward, Classification: CountryByIndustry, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: inward, Classification: CountryByIndustry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
+      # --- the original 25, tried for every series ---
+      - {DirectionOfInvestment: outward, Classification: [Country, Industry, CountryByIndustry]}
+      - {DirectionOfInvestment: inward,
+         Classification: [Country, Industry, CountryByIndustry, CountryofUBO, CountryofUBObyIndustry,
+                          CountrybyType, CountryofUBObyType]}
+      - {DirectionOfInvestment: [outward, inward], Classification: [Country, Industry, CountryByIndustry],
+         OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "0"}
       - {DirectionOfInvestment: parent, Classification: Industry, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: state, Classification: StatebyCountryofUBO, OwnershipLevel: "0", NonbankAffiliatesOnly: "0"}
-      - {DirectionOfInvestment: state, Classification: StatebyCountryofUBO, OwnershipLevel: "1", NonbankAffiliatesOnly: "0"}
+      - {DirectionOfInvestment: state, Classification: StatebyCountryofUBO, OwnershipLevel: ["0", "1"],
+         NonbankAffiliatesOnly: "0"}
+
+      # --- DI: classifications the original list never tried ---
+      - {series: "22-44, 62-69", DirectionOfInvestment: [outward, inward], Classification: IndustryByCountry}
+      - {series: "22-44, 62-69", DirectionOfInvestment: inward, Classification: IndustrybyCountryofUBO}
+      - {series: "62-69", DirectionOfInvestment: inward, Classification: [IndustrybyType, StatebyType, TypeofExpenditure]}
+
+      # --- AMNE: older years (NonbankAffiliatesOnly 1) ---
+      - {series: "1-21, 46-61", DirectionOfInvestment: [outward, inward], Classification: [Country, Industry, CountryByIndustry],
+         OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "1"}
+      - {series: "1-21, 46-61", DirectionOfInvestment: parent, Classification: Industry, OwnershipLevel: "1",
+         NonbankAffiliatesOnly: "1"}
+      - {series: "1-21, 46-61", DirectionOfInvestment: state, Classification: StatebyCountryofUBO,
+         OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "1"}
+
+      # --- AMNE: classifications the original list never tried (sales, services supplied by destination, ...) ---
+      - {series: "1-21, 46-61", DirectionOfInvestment: outward,
+         Classification: [IndustryByCountry, CountryByDestination, IndustryByDestination, IndustryofUSParent,
+                          IndustryofUSParentAllIndustries, IndustryofUSParentByCountry],
+         OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "0"}
+      - {series: "1-21, 46-61", DirectionOfInvestment: inward,
+         Classification: [IndustryByCountry, CountryofUBO, CountryofUBObyIndustry, IndustrybyCountryofUBO,
+                          CountryofUBObyDestination, IndustryByDestination, IndustryofSales],
+         OwnershipLevel: ["0", "1"], NonbankAffiliatesOnly: "0"}
 
   Regional:                  # states and metros: every line of each sampled table (see above)
     table_param: TableName

@@ -28,6 +28,13 @@ class BEAError(RuntimeError):
     """Raised when the API returns an error object instead of data."""
 
 
+class BEATransientError(BEAError):
+    """BEA didn't really answer: the connection dropped, it kept throttling us (429), it had a server
+    error (5xx) or it sent a page that isn't JSON. Unlike a normal BEAError this says nothing about
+    whether the data exists, so callers should try again later rather than treat it as "no data".
+    """
+
+
 class BEAClient:
     def __init__(
         self,
@@ -127,8 +134,8 @@ class BEAClient:
                 if attempt < self.max_retries:
                     time.sleep(self.network_pause * (attempt + 1))
                     continue
-                raise BEAError(f"Network problem, gave up after {attempt + 1} tries: "
-                               f"{self._hide_key(exc)}") from None
+                raise BEATransientError(f"Network problem, gave up after {attempt + 1} tries: "
+                                        f"{self._hide_key(exc)}") from None
             self.last_seconds = time.monotonic() - started
             self.last_bytes = len(resp.content)
             self._recent.append((time.monotonic(), self.last_bytes))
@@ -138,6 +145,8 @@ class BEAClient:
             if resp.status_code >= 500 and attempt < self.max_retries:  # BEA having a bad moment
                 time.sleep(self.network_pause * (attempt + 1))
                 continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise BEATransientError(f"HTTP {resp.status_code} from BEA, gave up after {attempt + 1} tries")
             if resp.status_code >= 400:
                 raise BEAError(f"HTTP {resp.status_code} from BEA")
             # BEA sends UTF-8; a few old footnotes aren't valid UTF-8, so fall back to Latin-1.
@@ -148,8 +157,8 @@ class BEAClient:
             try:
                 return json.loads(text)
             except ValueError:
-                raise BEAError(f"BEA sent something that isn't JSON: {text[:150]!r}") from None
-        raise BEAError("Gave up after repeated throttling (HTTP 429).")
+                raise BEATransientError(f"BEA sent something that isn't JSON: {text[:150]!r}") from None
+        raise BEATransientError("Gave up after repeated throttling (HTTP 429).")
 
     def _hide_key(self, exc: Exception) -> str:
         """Error text with the API key taken out (requests puts the whole URL in its messages)."""

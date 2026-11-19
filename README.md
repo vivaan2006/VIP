@@ -11,7 +11,7 @@ Our part of MacroCorpus: pulling data from the BEA (Bureau of Economic Analysis)
    ```
    That's it. It installs the packages, asks for your key the first time (saved to `macrocorpus-bea/.env`), checks the key works, then downloads every table of all 12 BEA datasets.
 
-   - The full run is long, plan on leaving it overnight, and needs 10+ GB of free disk. Regional now pulls every county, metro and state for every line, MNE tries 25 request settings per series, and BEA only allows 100 requests a minute.
+   - The full run is long, plan on leaving it overnight, and needs 10+ GB of free disk. Regional now pulls every county, metro and state for every line, MNE tries 25 to 66 request settings per series the first time (fewer on reruns, see below), and BEA only allows 100 requests a minute.
    - If it stops (laptop sleeps, Wi-Fi drops), run `python run.py` again. Every finished request is saved, so it skips straight to where it left off.
    - `python run.py --sample` is a quick test run (a few tables per dataset, about 10 minutes). `--sample 10` takes 10 tables per dataset.
    - `--only NIPA MNE` runs just some datasets, and `--refresh` ignores saved responses.
@@ -50,7 +50,11 @@ Runs IIP, MNE, IntlServTrade, FixedAssets and NIUnderlyingDetail (set in `config
 - For each of the 12 datasets, saves the **dictionary**: every parameter and every value it can take (all tables, industries, countries, etc.).
 - `python run.py` (or `python -m bea_corpus download`) downloads **every table** of every dataset and **every series in each table**, no cap. Nothing to add. `--sample` is only for quick test runs.
 - **Regional**: one line per request, so it requests every line, at **every geography level the table has** (county, state, metro, micropolitan, metro division, combined area, metro/nonmetro portion). It keeps all the levels that return data instead of stopping at the first one.
-- **MNE**: each series exists for some directions (outward, inward, parent, state), classifications (by country, industry, country x industry, ...) and ownership levels and not others. It tries all 25 combinations in `config/datasets.yaml` and keeps **every one with data**. Direction, classification and ownership level go in the series id.
+- **MNE**: each series exists for some directions (outward, inward, parent, state), classifications (by country, industry, country x industry, ...) and ownership levels and not others. It tries every combination in `config/datasets.yaml` that applies to that series (25 for most, up to 66 for the activities-of-multinationals series 1-21 and 46-61) and keeps **every one with data**. Direction, classification and ownership level go in the series id.
+  - Older years of those series need `NonbankAffiliatesOnly=1` (outward up to 2008, inward up to 2006), newer years `0`. Both are tried and join into one history, so expect a definition change at that year (before it, nonbank affiliates only).
+  - Combinations BEA turns down are remembered in `data/raw/cache/shapes_MNE.json` and skipped on the next run, so reruns are fast. `--refresh` tries them all again.
+  - `reports/shapes_MNE.json` lists, for every series, each combination tried and what BEA said: data, no data (with BEA's reason), skipped, or no answer.
+  - "No answer" (dropped connection, throttling, BEA server error) is never treated as "no data". It's logged as a warning and tried again on the next run.
 - **IntlServSTA**: BEA won't send every country at once, so it's one request per country.
 - **Empty tables**: if a whole-table request comes back empty or refused, it asks again one frequency at a time, then ten years at a time. A table with no series is `FAIL`, never `ok`.
 - Checks the download is complete: where BEA can list what a table should contain (Regional lines, ITA/IntlServTrade countries, GDPbyIndustry industries), it compares that list with what came back. Anything missing gets asked for on its own, and if it still has no data it goes in the issues.

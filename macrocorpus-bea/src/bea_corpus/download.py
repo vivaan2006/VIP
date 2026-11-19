@@ -18,6 +18,7 @@ Errors never stop the run. Each one is logged in reports/issues.json and the run
 
 from __future__ import annotations
 
+import itertools
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from .client import BEAClient, BEAError
+from .client import BEAClient, BEAError, BEATransientError
 from .common import as_list, desc_of, key_of, safe_name
 from .standardize_json import table_to_series
 
@@ -107,6 +108,51 @@ def regional_geographies(table: str) -> list[str]:
 REGIONAL_LAST_RESORT = "00000"  # national total, only if no geography level works at all
 
 
+def shape_memory_path(dataset: str) -> Path:
+    return RAW / "cache" / f"shapes_{dataset}.json"
+
+
+def parse_ids(spec) -> set[str]:
+    """'1-21, 46-61' -> {'1', ..., '21', '46', ..., '61'}. Plain ids and lists work too."""
+    out: set[str] = set()
+    for part in str(spec).replace(";", ",").split(",") if not isinstance(spec, list) else map(str, spec):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = (int(x) for x in part.split("-", 1))
+            out |= {str(i) for i in range(lo, hi + 1)}
+        elif part:
+            out.add(part)
+    return out
+
+
+def expand_shapes(entries: list[dict], table: str) -> list[dict]:
+    """The request shapes to try for one table.
+
+    Each config entry is one shape, or a grid of them: a list value means "each of these", so
+    {DirectionOfInvestment: [outward, inward], Classification: [Country, Industry]} is 4 shapes.
+    An optional `series` key ('1-21, 46-61') limits the entry to those tables. Repeats are dropped.
+    """
+    shapes, seen = [], set()
+    for entry in entries:
+        entry = dict(entry)
+        only = entry.pop("series", None)
+        if only is not None and str(table) not in parse_ids(only):
+            continue
+        keys = list(entry)
+        options = [[str(x) for x in v] if isinstance(v, list) else [str(v)] for v in entry.values()]
+        for combo in itertools.product(*options):
+            shape = dict(zip(keys, combo))
+            key = shape_key(shape)
+            if key not in seen:
+                seen.add(key)
+                shapes.append(shape)
+    return shapes
+
+
+def shape_key(shape: dict) -> str:
+    return json.dumps(shape, sort_keys=True)
+
+
 def _write_json(path: Path, obj, indent: int | None = 1) -> None:
     """Write via a temp file and rename, so a run that's interrupted never leaves half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +188,9 @@ class Downloader:
         self.use_cache = use_cache
         self.issues: list[Issue] = []
         self._last_error = ""
+        self._last_transient = False
+        self._shapes_known: dict[str, dict] = {}  # remembered "no data" shapes, see _all_shapes
+        self._shape_report: dict[str, dict] = {}
         self._split_values: list[str] = []
         self._years: list[str] = []
 
@@ -287,20 +336,28 @@ class Downloader:
             self.log(dataset, table, "warning", f"{stats['unit_changes']} series change units partway through; "
                                                 "see unit_history.")
 
-    def _get(self, dataset: str, t: TableResult, request: dict, probe: bool = False) -> tuple[dict, dict] | None:
+    def _get(self, dataset: str, t: TableResult, request: dict, probe: bool = False,
+             log_transient: bool = True) -> tuple[dict, dict] | None:
         """One GetData call. Returns (request, results), or None after logging the error.
 
         Every call is counted in t.requests; only calls that returned data rows count as ok.
-        probe=True is for trying out a request shape (e.g. which geography a table has):
-        a failure there is expected, so it isn't logged.
+        probe=True is for trying out a request shape (e.g. which geography a table has): BEA saying
+        "no such data" is expected there, so it isn't logged. A network or throttling failure is
+        different, it means we don't know, so it is always logged (as a warning on a probe) unless
+        the caller sums those up itself (log_transient=False).
         """
         t.requests += 1
+        self._last_error, self._last_transient = "", False
         try:
             results = self.client.get_data(dataset, use_cache=self.use_cache, **request)
         except Exception as exc:  # API errors and network errors alike: log and move on
             self._last_error = str(exc)
+            self._last_transient = not isinstance(exc, BEAError) or isinstance(exc, BEATransientError)
             if not probe:
                 self.log(dataset, t.table, "error", f"GetData failed for {_short(request)}: {str(exc)[:200]}")
+            elif self._last_transient and log_transient:
+                self.log(dataset, t.table, "warning", f"BEA didn't answer for {_short(request)} "
+                                                      f"({str(exc)[:150]}); rerun to try it again.")
             return None
         t.mb += self.client.last_bytes / (1024 * 1024)
         if as_list(results.get("Data")):
@@ -366,22 +423,72 @@ class Downloader:
         return responses
 
     def _all_shapes(self, dataset: str, t: TableResult, params: dict,
-                    shapes: list[dict]) -> list[tuple[dict, dict]]:
-        """Try every request shape and keep ALL that return data.
+                    entries: list[dict]) -> list[tuple[dict, dict]]:
+        """Try every request shape that applies to this table and keep ALL that return data.
 
         MNE needs this: each series exists for some directions of investment, classifications and
         ownership levels and not others (BEA errors on the rest), and many exist for several, e.g.
         employment of foreign affiliates of U.S. companies (outward) AND of U.S. affiliates of foreign
         companies (inward). Stopping at the first that works would drop the others.
+
+        Every shape's result is written to reports/shapes_<dataset>.json. Shapes BEA turned down are
+        remembered in data/raw/cache/, so a rerun skips them (--refresh tries them all again).
+        A network or throttling failure is never remembered: it says nothing about the data, so it is
+        logged and tried again on the next run.
         """
-        responses = []
-        for extra in shapes:
-            got = self._get(dataset, t, {**params, **extra}, probe=True)
+        shapes = expand_shapes(entries, t.table)
+        known = self._shape_memory(dataset).setdefault(t.table, {})
+        responses, results, refused, unanswered, skipped = [], [], [], [], 0
+        for shape in shapes:
+            key = shape_key(shape)
+            if self.use_cache and key in known:
+                skipped += 1
+                results.append({"shape": shape, "status": "skipped", "message": known[key]})
+                continue
+            got = self._get(dataset, t, {**params, **shape}, probe=True, log_transient=False)
             if _has_rows(got):
+                known.pop(key, None)  # only matters with --refresh: BEA has this shape now
                 responses.append(got)
-        if not responses:
-            self.log(dataset, t.table, "error", f"No data with any of the {len(shapes)} request shapes tried.")
+                results.append({"shape": shape, "status": "data", "rows": len(as_list(got[1].get("Data")))})
+            elif self._last_transient:
+                unanswered.append((shape, self._last_error))
+                results.append({"shape": shape, "status": "no answer", "message": self._last_error[:300]})
+            else:
+                message = self._last_error[:300] or "BEA answered with no rows"
+                known[key] = message
+                refused.append(message)
+                results.append({"shape": shape, "status": "no data", "message": message})
+        self._shape_report.setdefault(dataset, {})[t.table] = results
+
+        t.check = f"{len(shapes)} request shapes" + (f", {skipped} known-empty skipped" if skipped else "")
+        t.expected = len(shapes)
+        t.missing = [_short(shape) for shape, _ in unanswered]
+        if unanswered:
+            self.log(dataset, t.table, "warning", f"{len(unanswered)} of {len(shapes)} request shapes got no answer "
+                                                  f"from BEA (network or throttling, e.g. {unanswered[0][1][:120]}); "
+                                                  "rerun to try them again.")
+        if not responses and not unanswered:
+            reasons = "; ".join(dict.fromkeys(m[:120] for m in refused))[:400] or "every shape was skipped"
+            self.log(dataset, t.table, "error", f"No data with any of the {len(shapes)} request shapes "
+                                                f"({skipped} skipped as known-empty). BEA said: {reasons}")
         return responses
+
+    def _shape_memory(self, dataset: str) -> dict:
+        """Shapes BEA has already turned down, per table: {table: {shape_key: BEA's message}}."""
+        if dataset not in self._shapes_known:
+            path = shape_memory_path(dataset)
+            try:
+                self._shapes_known[dataset] = json.loads(path.read_text()) if path.exists() else {}
+            except (ValueError, OSError):
+                self._shapes_known[dataset] = {}
+        return self._shapes_known[dataset]
+
+    def _save_shapes(self, dataset: str) -> None:
+        if dataset in self._shapes_known:
+            _write_json(shape_memory_path(dataset), self._shapes_known[dataset])
+        if dataset in self._shape_report:
+            REPORTS.mkdir(exist_ok=True)
+            _write_json(REPORTS / f"shapes_{dataset}.json", self._shape_report[dataset], indent=1)
 
     def _regional_table(self, t: TableResult, params: dict) -> list[tuple[dict, dict]]:
         """Regional returns one line of a table per call, so ask for every line the dictionary lists."""
@@ -494,6 +601,7 @@ class Downloader:
                 continue
             print(f"\n== {name}")
             results.append(self.download_dataset(name))
+            self._save_shapes(name)
         write_reports(results, self.issues, partial=bool(only))
         return results
 
