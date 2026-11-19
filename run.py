@@ -61,15 +61,16 @@ def preflight() -> None:
     sys.path.insert(0, str(PROJECT / "src"))
     from dotenv import load_dotenv
 
-    from bea_corpus.client import BEAClient, BEAError
+    from bea_corpus.client import BEAClient, BEAError, is_transient
     load_dotenv(ENV_FILE)
     client = BEAClient(cache_dir=None, network_pause=2, max_retries=1)
     try:
         n = len(client.get_dataset_list())
     except BEAError as exc:
         text = str(exc)
-        if "Network" in text:
-            sys.exit(f"  Can't reach BEA ({text[:200]}).\n  Check your internet connection and run again.")
+        if is_transient(exc):
+            sys.exit(f"  Can't reach BEA right now ({text[:200]}).\n"
+                     "  Check your internet connection, or BEA may be busy. Wait a few minutes and run again.")
         sys.exit(f"  BEA rejected the request: {text[:200]}\n"
                  f"  If it's about the UserID, the key is wrong. Fix it in {ENV_FILE} and run again.")
     print(f"  OK, BEA lists {n} datasets.")

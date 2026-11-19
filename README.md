@@ -11,7 +11,7 @@ Our part of MacroCorpus: pulling data from the BEA (Bureau of Economic Analysis)
    ```
    That's it. It installs the packages, asks for your key the first time (saved to `macrocorpus-bea/.env`), checks the key works, then downloads every table of all 12 BEA datasets.
 
-   - The full run is long, plan on leaving it overnight, and needs 10+ GB of free disk. Regional now pulls every county, metro and state for every line, MNE tries 25 to 66 request settings per series the first time (fewer on reruns, see below), and BEA only allows 100 requests a minute.
+   - The full run is long, plan on leaving it overnight, and needs 10+ GB of free disk. Regional now pulls every county, metro and state for every line, MNE tries 25 to 86 request settings per series the first time (about 2,300 requests; reruns skip the ones BEA turned down), and BEA only allows 100 requests a minute.
    - If it stops (laptop sleeps, Wi-Fi drops), run `python run.py` again. Every finished request is saved, so it skips straight to where it left off.
    - `python run.py --sample` is a quick test run (a few tables per dataset, about 10 minutes). `--sample 10` takes 10 tables per dataset.
    - `--only NIPA MNE` runs just some datasets, and `--refresh` ignores saved responses.
@@ -27,12 +27,13 @@ Our part of MacroCorpus: pulling data from the BEA (Bureau of Economic Analysis)
 | Summary per dataset and per table | `reports/coverage.md` |
 | Everything that looked off | `reports/issues.json` |
 | Everything the run printed | `reports/run_log.txt` |
+| Every MNE request setting tried, per series, and what BEA said | `reports/shapes_MNE.json` |
 
 What to look for:
 
 - **Start with the table at the top of `reports/coverage.md`.** Every dataset should have a status of `ok` or `issues` and a series count above 0. `failed` means nothing came back for that dataset.
-- **In `reports/issues.json`, `error` is the one that matters.** It means a request got nothing back. A handful are normal, since some BEA tables reject the "everything" request. Lots of errors in one dataset, or errors saying `Network problem`, mean something actually went wrong, so just rerun.
-- **`warning` and `info` are mostly BEA's own gaps, not our bugs.** Known ones are GDPbyIndustry listing industry `622HO` that never has data, some IIP and MNE series where every value is hidden (`(D)` = suppressed for privacy), and MNE series that only exist for some directions of investment.
+- **In `reports/issues.json`, `error` is the one that matters.** It means a request got nothing back. A handful are normal, since some BEA tables reject the "everything" request. Lots of errors in one dataset, or any error or warning that says BEA didn't answer / `rerun to try again` (network, throttling, BEA server trouble), mean something actually went wrong, so just rerun. Those are never counted as "no data", and a table BEA didn't fully answer keeps its last good download.
+- **`warning` and `info` are mostly BEA's own gaps, not our bugs.** Known ones are GDPbyIndustry listing industry `622HO` that never has data, some IIP and MNE series where every value is hidden (`(D)` = suppressed for privacy), MNE series that only exist for some directions of investment, and 9 MNE series BEA has discontinued (11, 13, 16, 19, 50, 51, 52, 55, 56), which show up as `info`.
 - **"Requests with data" is lower than total requests on purpose.** Regional tries every geography level and MNE tries every request setting, and the ones BEA doesn't publish come back empty. What matters per table is `Series` above 0 and the `Missing` column.
 - **If the run stopped early,** the last lines of `reports/run_log.txt` show where. Rerun and it continues from there.
 
@@ -50,16 +51,10 @@ Runs IIP, MNE, IntlServTrade, FixedAssets and NIUnderlyingDetail (set in `config
 - For each of the 12 datasets, saves the **dictionary**: every parameter and every value it can take (all tables, industries, countries, etc.).
 - `python run.py` (or `python -m bea_corpus download`) downloads **every table** of every dataset and **every series in each table**, no cap. Nothing to add. `--sample` is only for quick test runs.
 - **Regional**: one line per request, so it requests every line, at **every geography level the table has** (county, state, metro, micropolitan, metro division, combined area, metro/nonmetro portion). It keeps all the levels that return data instead of stopping at the first one.
-- **MNE**: each series exists for some directions (outward, inward, parent, state), classifications (by country, industry, country x industry, ...) and ownership levels and not others. It tries every combination in `config/datasets.yaml` that applies to that series (25 for most, up to 66 for the activities-of-multinationals series 1-21 and 46-61) and keeps **every one with data**. Direction, classification and ownership level go in the series id.
-  - Older years of those series need `NonbankAffiliatesOnly=1` (outward up to 2008, inward up to 2006), newer years `0`. Both are tried and join into one history, so expect a definition change at that year (before it, nonbank affiliates only).
-  - Combinations BEA turns down are remembered in `data/raw/cache/shapes_MNE.json` and skipped on the next run, so reruns are fast. `--refresh` tries them all again.
-  - `reports/shapes_MNE.json` lists, for every series, each combination tried and what BEA said: data, no data (with BEA's reason), skipped, or no answer.
-  - "No answer" (dropped connection, throttling, BEA server error) is never treated as "no data". It's logged as a warning and tried again on the next run.
-- **IntlServSTA**: BEA won't send every country at once, so it's one request per country.
-- **Empty tables**: if a whole-table request comes back empty or refused, it asks again one frequency at a time, then ten years at a time. A table with no series is `FAIL`, never `ok`.
-- Checks the download is complete: where BEA can list what a table should contain (Regional lines, ITA/IntlServTrade countries, GDPbyIndustry industries), it compares that list with what came back. Anything missing gets asked for on its own, and if it still has no data it goes in the issues.
-- Stores every series as JSON: info about the series (dataset, title, frequency, units) plus a list of dates and a list of values.
-- **A series is decided by its codes only** (SeriesCode, RowCode, GeoFips, Industry, ...), never by names or display order. So when BEA renames something (East Timor became Timor-Leste in 2009) it stays one unbroken history, and every name it had is kept in `label_history`. The series id is built from the same codes, so it's the same every run.
+- **MNE**: each series exists for some directions (outward, inward, parent, state), classifications (by country, industry, country x industry, destination, ...) and ownership levels and not others. It tries every combination in `config/datasets.yaml` that applies to that series and keeps **every one with data**. The original 25 are tried for every series; the rest only go to the series BEA's own series list says exist in that direction. Direction, classification and ownership level go in the series id.
+  - Older years of the activities-of-multinationals series need `NonbankAffiliatesOnly=1` (outward and parent up to 2008, inward up to 2006), newer years `0`. Both are tried and join into one history, and the series' `definition_history` says where it switches (before it, nonbank affiliates only).
+  - Combinations BEA turns down are remembered for 60 days in `data/raw/cache/shapes_MNE.json` (saved after every series, so an interrupted run keeps them) and skipped, so reruns are fast. `--refresh` tries them all again.
+  - `reports/shapes_MNE.json` lists, for every series, each combination tried and what happened: data, no data (with BEA's reason), skipped, or no answer.
 - If one code carries several measures told apart only by name (GDPbyIndustry table 25 lists energy inputs, value added, ... under industry 11), those are split into separate series.
 - If BEA sends two different numbers for the same series and date, the first is kept and it's logged as a warning. Exact repeats are merged quietly.
 - Units: MNE only says "Millions of Dollars" in a text field, so that's read into `unit: USD` and `unit_multiplier: 6`.

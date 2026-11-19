@@ -1,4 +1,5 @@
 """Client rate-limit behaviour, offline."""
+import json
 
 from bea_corpus import client as C
 
@@ -95,3 +96,58 @@ def test_no_answer_and_no_data_are_different_errors(monkeypatch, tmp_path):
     refused = raised(client_answering(lambda *a, **k: Resp(200, b'{"BEAAPI": {"Results": {"Error": '
                                                              b'{"APIErrorDescription": "Invalid combination"}}}}')))
     assert not isinstance(refused, BEATransientError) and "Invalid combination" in str(refused)
+
+
+def test_blocked_timeout_and_throttle_messages_are_no_answer(monkeypatch, tmp_path):
+    from bea_corpus.client import BEAClient, BEAError, is_transient
+
+    class Resp:
+        def __init__(self, status, body=b"{}", headers=None):
+            self.status_code, self.content, self.headers = status, body, headers or {}
+
+    calls = []
+
+    def answering(*responses):
+        it = iter(responses)
+
+        def get(*a, **k):
+            calls.append(1)
+            return next(it)
+        c = BEAClient(api_key="k", cache_dir=tmp_path, min_interval=0, network_pause=0, max_retries=1, error_pause=0)
+        monkeypatch.setattr(c._session, "get", get)
+        return c
+
+    def raised(c):
+        try:
+            c.get_data("MNE", SeriesID="4")
+        except BEAError as exc:
+            return exc
+        raise AssertionError("should have raised")
+
+    for status in (403, 408):
+        assert is_transient(raised(answering(Resp(status), Resp(status))))
+    busy = b'{"BEAAPI": {"Results": {"Error": {"APIErrorDescription": "Too many requests, please try again later"}}}}'
+    assert is_transient(raised(answering(Resp(200, busy))))
+    no_data = b'{"BEAAPI": {"Results": {"Error": {"APIErrorDescription": "No data available for this selection"}}}}'
+    assert not is_transient(raised(answering(Resp(200, no_data))))
+
+    calls.clear()  # 429 waits Retry-After, then succeeds
+    c = answering(Resp(429, headers={"Retry-After": "0"}), Resp(200, b'{"BEAAPI": {"Results": {"Data": [{"a": 1}]}}}'))
+    monkeypatch.setattr(C.time, "sleep", lambda s: None)
+    assert c.get_data("MNE", SeriesID="4")["Data"] == [{"a": 1}] and len(calls) == 2
+
+
+def test_damaged_cache_file_is_fetched_again(monkeypatch, tmp_path):
+    from bea_corpus.client import BEAClient
+
+    class Resp:
+        status_code, headers = 200, {}
+        content = b'{"BEAAPI": {"Results": {"Data": [{"a": 1}]}}}'
+
+    c = BEAClient(api_key="k", cache_dir=tmp_path, min_interval=0, error_pause=0)
+    monkeypatch.setattr(c._session, "get", lambda *a, **k: Resp())
+    c.get_data("MNE", SeriesID="4")
+    cached = next(tmp_path.glob("*.json"))
+    cached.write_text('{"BEAAPI": {"Res')                      # cut off mid-write
+    assert c.get_data("MNE", SeriesID="4")["Data"] == [{"a": 1}]
+    assert json.loads(cached.read_text())                      # and the file is whole again

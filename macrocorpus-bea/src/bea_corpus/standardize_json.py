@@ -147,14 +147,16 @@ def dimension_columns(rows: list[dict], results: dict) -> list[str]:
 
 
 def to_series(results: dict, dataset: str, table: str, request: dict | None = None,
-              retrieved: date | None = None, identity_params: list[str] | None = None) -> tuple[list[dict], dict]:
+              retrieved: date | None = None, identity_params: list[str] | None = None,
+              history_params: list[str] | None = None) -> tuple[list[dict], dict]:
     """Convert one GetData `Results` object into standard series records (see table_to_series)."""
-    return table_to_series([(request or {}, results)], dataset, table, retrieved, identity_params)
+    return table_to_series([(request or {}, results)], dataset, table, retrieved, identity_params, history_params)
 
 
 def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str,
                     retrieved: date | None = None,
-                    identity_params: list[str] | None = None) -> tuple[list[dict], dict]:
+                    identity_params: list[str] | None = None,
+                    history_params: list[str] | None = None) -> tuple[list[dict], dict]:
     """Convert every response for one table into standard series records.
 
     All responses are merged first, so a series that shows up in two requests (state totals in both
@@ -169,6 +171,9 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
       - if two rows share the codes AND the date but carry different labels and different numbers,
         the labels are telling apart different measures (GDPbyIndustry table 25 lists energy inputs,
         value added, ... all under industry 11). Those are split by label and the id says so.
+      - `history_params` are request settings that DON'T split a series but mark a change in what it
+        covers (MNE's NonbankAffiliatesOnly: older years are nonbank affiliates only). When a series
+        mixes values, every change is listed in `definition_history`, with the dates each value covers.
       - two rows with the same codes, labels and date: equal numbers are a harmless repeat;
         different numbers are a conflict. The first is kept and the conflict is counted, never hidden.
 
@@ -266,6 +271,18 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
         if len(history) > 1:
             stats["renamed"] += 1
 
+        # request settings over time (e.g. nonbank-only years, then all affiliates)
+        definitions = []
+        for d in dates:
+            request = responses[chosen[d][5]][0]
+            setting = {p: str(request[p]) for p in history_params or [] if p in request}
+            if not definitions or definitions[-1]["settings"] != setting:
+                definitions.append({"settings": setting, "from": d, "to": d})
+            else:
+                definitions[-1]["to"] = d
+        if len(definitions) > 1:
+            stats["definition_changes"] += 1
+
         # units over time, same idea
         last_row, last_i = chosen[dates[-1]][4], chosen[dates[-1]][5]
         unit, mult = unit_of(last_row, responses[last_i][1])
@@ -313,6 +330,8 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
         }
         if len(history) > 1:
             record["label_history"] = history
+        if len(definitions) > 1:
+            record["definition_history"] = definitions
         if len(units_seen) > 1:
             record["unit_history"] = [{"unit": u, "unit_multiplier": m} for u, m in units_seen]
         records.append(record)

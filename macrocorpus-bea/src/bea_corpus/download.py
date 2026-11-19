@@ -21,12 +21,12 @@ from __future__ import annotations
 import itertools
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
 
-from .client import BEAClient, BEAError, BEATransientError
+from .client import BEAClient, BEAError, is_transient
 from .common import as_list, desc_of, key_of, safe_name
 from .standardize_json import table_to_series
 
@@ -37,6 +37,7 @@ REPORTS = Path("reports")
 
 NOT_A_DATASET = {"apidatasetmetadata"}  # listed by GetDataSetList but holds no data
 YEAR_CHUNK = 10  # when a whole-table request comes back empty, years per smaller request
+SHAPE_MEMORY_DAYS = 60  # a shape BEA turned down is tried again after this long (BEA adds data in its releases)
 
 
 @dataclass
@@ -60,6 +61,7 @@ class TableResult:
     check: str = "whole table in one call"
     expected: int | None = None
     missing: list[str] = field(default_factory=list)
+    unanswered: int = 0  # requests BEA never really answered (network, throttling): we don't know what's there
 
 
 @dataclass
@@ -112,13 +114,29 @@ def shape_memory_path(dataset: str) -> Path:
     return RAW / "cache" / f"shapes_{dataset}.json"
 
 
+def _read_dict(path: Path) -> dict:
+    """A JSON object from disk, or {} if the file is missing, damaged or not an object."""
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def series_file_exists(dataset: str, table: str) -> bool:
+    return (CORPUS / dataset / "series" / f"{safe_name(table)}.json").exists()
+
+
 def parse_ids(spec) -> set[str]:
     """'1-21, 46-61' -> {'1', ..., '21', '46', ..., '61'}. Plain ids and lists work too."""
     out: set[str] = set()
     for part in str(spec).replace(";", ",").split(",") if not isinstance(spec, list) else map(str, spec):
         part = part.strip()
         if "-" in part:
-            lo, hi = (int(x) for x in part.split("-", 1))
+            try:
+                lo, hi = (int(x) for x in part.split("-", 1))
+            except ValueError:
+                raise ValueError(f"Bad series range {part!r} in config/datasets.yaml (use e.g. '1-21, 46')") from None
             out |= {str(i) for i in range(lo, hi + 1)}
         elif part:
             out.add(part)
@@ -189,6 +207,7 @@ class Downloader:
         self.issues: list[Issue] = []
         self._last_error = ""
         self._last_transient = False
+        self._last_bug = False
         self._shapes_known: dict[str, dict] = {}  # remembered "no data" shapes, see _all_shapes
         self._shape_report: dict[str, dict] = {}
         self._split_values: list[str] = []
@@ -281,7 +300,8 @@ class Downloader:
         elif cfg.get("split_by"):
             responses = self._split(dataset, t, params, cfg["split_by"], self._split_values)
         elif cfg.get("request_shapes"):
-            responses = self._all_shapes(dataset, t, params, cfg["request_shapes"])
+            responses = self._all_shapes(dataset, t, params, cfg["request_shapes"],
+                                         discontinued=parse_ids(cfg.get("discontinued", "")))
         else:
             responses = self._whole_table(dataset, t, params)
 
@@ -289,7 +309,8 @@ class Downloader:
             self._check_against_dictionary(dataset, cfg, table, t, responses)
 
         try:
-            records, stats = table_to_series(responses, dataset, table, identity_params=cfg.get("identity_params"))
+            records, stats = table_to_series(responses, dataset, table, identity_params=cfg.get("identity_params"),
+                                             history_params=cfg.get("history_params"))
         except Exception as exc:  # one odd response shouldn't stop the whole run
             records, stats = [], {}
             self.log(dataset, table, "error", f"Couldn't turn BEA's response into series: {exc!r:.200}")
@@ -300,6 +321,12 @@ class Downloader:
 
         if responses and not records:
             self.log(dataset, table, "error", "BEA answered but no data rows came back, even in smaller requests.")
+        if t.unanswered and series_file_exists(dataset, table):
+            # BEA didn't answer some requests, so this run's result may be missing series. Keep the last
+            # complete download instead of overwriting or deleting it; the next run tries again.
+            self.log(dataset, table, "warning", f"Kept the previous download of this table: BEA didn't answer "
+                                                f"{t.unanswered} request(s) this run.")
+            return t
         if t.empty_series:
             self.log(dataset, table, "info", f"{t.empty_series} of {t.series} series have no values at all "
                                              "(every value suppressed or not available).")
@@ -332,6 +359,10 @@ class Downloader:
         if stats.get("identical_merged"):
             self.log(dataset, table, "info", f"{stats['identical_merged']} series had exactly the same numbers as "
                                              "another breakdown of this table; folded in, listed under also_as.")
+        if stats.get("definition_changes"):
+            self.log(dataset, table, "info", f"{stats['definition_changes']} series join years downloaded with "
+                                             "different settings (e.g. nonbank affiliates only in older years); "
+                                             "see definition_history.")
         if stats.get("unit_changes"):
             self.log(dataset, table, "warning", f"{stats['unit_changes']} series change units partway through; "
                                                 "see unit_history.")
@@ -347,13 +378,18 @@ class Downloader:
         the caller sums those up itself (log_transient=False).
         """
         t.requests += 1
-        self._last_error, self._last_transient = "", False
+        self._last_error, self._last_transient, self._last_bug = "", False, False
         try:
             results = self.client.get_data(dataset, use_cache=self.use_cache, **request)
-        except Exception as exc:  # API errors and network errors alike: log and move on
+        except Exception as exc:  # API errors, network errors and our own bugs alike: log and move on
             self._last_error = str(exc)
-            self._last_transient = not isinstance(exc, BEAError) or isinstance(exc, BEATransientError)
-            if not probe:
+            self._last_transient = is_transient(exc)
+            if self._last_transient:
+                t.unanswered += 1
+            self._last_bug = not isinstance(exc, BEAError) and not self._last_transient
+            if self._last_bug:  # a bug on our side, never "no data"
+                self.log(dataset, t.table, "error", f"Unexpected error for {_short(request)}: {exc!r:.200}")
+            elif not probe:
                 self.log(dataset, t.table, "error", f"GetData failed for {_short(request)}: {str(exc)[:200]}")
             elif self._last_transient and log_transient:
                 self.log(dataset, t.table, "warning", f"BEA didn't answer for {_short(request)} "
@@ -368,7 +404,6 @@ class Downloader:
         """The whole table in one call. If BEA sends it back empty or refuses it, ask in smaller pieces:
         one frequency at a time, then ten years at a time. (NIUnderlyingDetail U20403-U20405 come back
         empty for Frequency=A,Q,M but have data one frequency at a time.)"""
-        self._last_error = ""
         got = self._get(dataset, t, params, probe=True)
         if _has_rows(got):
             return [got]
@@ -408,22 +443,28 @@ class Downloader:
         if not split_values:
             self.log(dataset, t.table, "error", f"The dictionary lists no {dim} values to split the table by.")
             return []
-        responses = []
+        responses, unanswered = [], []
         for value in split_values:
-            got = self._get(dataset, t, {**params, dim: value}, probe=True)
+            got = self._get(dataset, t, {**params, dim: value}, probe=True, log_transient=False)
             if got and as_list(got[1].get("Data")):
                 responses.append(got)
+            elif self._last_transient:
+                unanswered.append(value)
             else:
                 t.missing.append(value)
-        if not responses:
+        if unanswered:
+            self.log(dataset, t.table, "warning" if responses else "error",
+                     f"BEA didn't answer for {len(unanswered)} of {len(split_values)} {dim} values "
+                     f"(e.g. {', '.join(unanswered[:5])}); rerun to try them again.")
+        if not responses and not unanswered:
             self.log(dataset, t.table, "error", f"None of the {len(split_values)} {dim} values returned data.")
         elif t.missing:
             self.log(dataset, t.table, "info", f"{len(t.missing)} of {len(split_values)} {dim} values have no data "
                                                f"for this table (e.g. {', '.join(t.missing[:5])}).")
         return responses
 
-    def _all_shapes(self, dataset: str, t: TableResult, params: dict,
-                    entries: list[dict]) -> list[tuple[dict, dict]]:
+    def _all_shapes(self, dataset: str, t: TableResult, params: dict, entries: list[dict],
+                    discontinued: set[str] = frozenset()) -> list[tuple[dict, dict]]:
         """Try every request shape that applies to this table and keep ALL that return data.
 
         MNE needs this: each series exists for some directions of investment, classifications and
@@ -431,57 +472,75 @@ class Downloader:
         employment of foreign affiliates of U.S. companies (outward) AND of U.S. affiliates of foreign
         companies (inward). Stopping at the first that works would drop the others.
 
-        Every shape's result is written to reports/shapes_<dataset>.json. Shapes BEA turned down are
-        remembered in data/raw/cache/, so a rerun skips them (--refresh tries them all again).
-        A network or throttling failure is never remembered: it says nothing about the data, so it is
-        logged and tried again on the next run.
+        - Every shape's result goes to reports/shapes_<dataset>.json.
+        - Shapes BEA turned down are remembered in data/raw/cache/shapes_<dataset>.json and skipped for
+          SHAPE_MEMORY_DAYS (--refresh tries them all again). Both files are saved after every table, so
+          an interrupted run keeps what it learned.
+        - A network or throttling failure is never remembered: it says nothing about the data, so it is
+          logged and tried again on the next run.
         """
         shapes = expand_shapes(entries, t.table)
-        known = self._shape_memory(dataset).setdefault(t.table, {})
+        known = self._shape_memory(dataset).get(t.table, {})
+        today = date.today()
+        fresh_after = (today - timedelta(days=SHAPE_MEMORY_DAYS)).isoformat()
         responses, results, refused, unanswered, skipped = [], [], [], [], 0
         for shape in shapes:
-            key = shape_key(shape)
-            if self.use_cache and key in known:
+            request = {**params, **shape}
+            key = shape_key(request)
+            seen = known.get(key)
+            if self.use_cache and isinstance(seen, dict) and seen.get("checked", "") >= fresh_after:
                 skipped += 1
-                results.append({"shape": shape, "status": "skipped", "message": known[key]})
+                refused.append(seen.get("message", ""))
+                results.append({"shape": shape, "status": "skipped", "message": seen.get("message", "")})
                 continue
-            got = self._get(dataset, t, {**params, **shape}, probe=True, log_transient=False)
+            got = self._get(dataset, t, request, probe=True, log_transient=False)
             if _has_rows(got):
-                known.pop(key, None)  # only matters with --refresh: BEA has this shape now
+                known.pop(key, None)  # BEA has this shape now
                 responses.append(got)
                 results.append({"shape": shape, "status": "data", "rows": len(as_list(got[1].get("Data")))})
             elif self._last_transient:
                 unanswered.append((shape, self._last_error))
                 results.append({"shape": shape, "status": "no answer", "message": self._last_error[:300]})
+            elif self._last_bug:  # our own error, already logged; says nothing about BEA's data
+                results.append({"shape": shape, "status": "error", "message": self._last_error[:300]})
             else:
-                message = self._last_error[:300] or "BEA answered with no rows"
-                known[key] = message
+                message = "BEA answered with no rows" if got is not None else self._last_error[:300]
+                known[key] = {"message": message, "checked": today.isoformat()}
                 refused.append(message)
                 results.append({"shape": shape, "status": "no data", "message": message})
-        self._shape_report.setdefault(dataset, {})[t.table] = results
+        memory = self._shape_memory(dataset)
+        if known:
+            memory[t.table] = known
+        else:
+            memory.pop(t.table, None)
+        self._shape_report.setdefault(dataset, self._old_shape_report(dataset))[t.table] = results
+        self._save_shapes(dataset)
 
         t.check = f"{len(shapes)} request shapes" + (f", {skipped} known-empty skipped" if skipped else "")
-        t.expected = len(shapes)
-        t.missing = [_short(shape) for shape, _ in unanswered]
         if unanswered:
-            self.log(dataset, t.table, "warning", f"{len(unanswered)} of {len(shapes)} request shapes got no answer "
-                                                  f"from BEA (network or throttling, e.g. {unanswered[0][1][:120]}); "
-                                                  "rerun to try them again.")
-        if not responses and not unanswered:
-            reasons = "; ".join(dict.fromkeys(m[:120] for m in refused))[:400] or "every shape was skipped"
-            self.log(dataset, t.table, "error", f"No data with any of the {len(shapes)} request shapes "
-                                                f"({skipped} skipped as known-empty). BEA said: {reasons}")
+            t.check += f", {len(unanswered)} got no answer"
+            self.log(dataset, t.table, "warning" if responses else "error",
+                     f"{len(unanswered)} of {len(shapes)} request shapes got no answer from BEA (network or "
+                     f"throttling, e.g. {unanswered[0][1][:120]}); rerun to try them again.")
+        elif not responses:
+            reasons = "; ".join(dict.fromkeys(m[:120] for m in refused if m))[:400] or "no reason given"
+            if t.table in discontinued:
+                self.log(dataset, t.table, "info", f"No data with any of the {len(shapes)} request shapes. BEA lists "
+                                                   "this series as discontinued, so that's expected.")
+            else:
+                self.log(dataset, t.table, "error", f"No data with any of the {len(shapes)} request shapes "
+                                                    f"({skipped} skipped as known-empty). BEA said: {reasons}")
         return responses
 
     def _shape_memory(self, dataset: str) -> dict:
-        """Shapes BEA has already turned down, per table: {table: {shape_key: BEA's message}}."""
+        """Shapes BEA has already turned down: {table: {request_key: {"message", "checked"}}}."""
         if dataset not in self._shapes_known:
-            path = shape_memory_path(dataset)
-            try:
-                self._shapes_known[dataset] = json.loads(path.read_text()) if path.exists() else {}
-            except (ValueError, OSError):
-                self._shapes_known[dataset] = {}
+            self._shapes_known[dataset] = _read_dict(shape_memory_path(dataset))
         return self._shapes_known[dataset]
+
+    def _old_shape_report(self, dataset: str) -> dict:
+        """The last report, so a run of a few tables (--sample) updates it instead of replacing it."""
+        return _read_dict(REPORTS / f"shapes_{dataset}.json")
 
     def _save_shapes(self, dataset: str) -> None:
         if dataset in self._shapes_known:
@@ -601,7 +660,6 @@ class Downloader:
                 continue
             print(f"\n== {name}")
             results.append(self.download_dataset(name))
-            self._save_shapes(name)
         write_reports(results, self.issues, partial=bool(only))
         return results
 
@@ -614,7 +672,7 @@ def _short(request: dict) -> str:
 def _status_word(t: TableResult) -> str:
     if not t.series:
         return "FAIL"
-    return "partial" if t.missing else "ok"
+    return "partial" if t.missing or t.unanswered else "ok"
 
 
 def dataset_status(d: DatasetResult, issues: list[Issue]) -> str:
@@ -724,12 +782,14 @@ def restandardize(config_path: str | Path = "config/datasets.yaml") -> dict:
     for ds_dir in sorted(p for p in RAW.iterdir() if p.is_dir() and p.name != "cache"):
         n = 0
         identity = datasets.get(ds_dir.name, {}).get("identity_params")
+        history = datasets.get(ds_dir.name, {}).get("history_params")
         for raw in sorted(ds_dir.glob("*.json")):
             blob = json.loads(raw.read_text())
             if "responses" not in blob:  # left over from the old layout
                 continue
             records, _ = table_to_series([(r["request"], r["results"]) for r in blob["responses"]],
-                                         blob["dataset"], blob["table"], identity_params=identity)
+                                         blob["dataset"], blob["table"], identity_params=identity,
+                                         history_params=history)
             out = CORPUS / blob["dataset"] / "series" / raw.name
             old = json.loads(out.read_text()) if out.exists() else {}
             _write_json(out, {**old, "dataset": blob["dataset"], "table": blob["table"],
