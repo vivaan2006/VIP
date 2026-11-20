@@ -653,3 +653,15 @@ def test_empty_table_keeps_its_file_when_a_dictionary_list_got_no_answer():
     d.download_dictionary("FixedAssets")
     t = d.download_table("FixedAssets", cfg, "T1", "", {"TableName": "T1", "Year": "ALL"})
     assert series.exists() and t.unanswered == 1 and "kept previous download" in t.check
+
+
+def test_kept_download_also_checks_merged_ids():
+    outward = {"DirectionOfInvestment": "outward", "Classification": "Country"}
+    inward = {"DirectionOfInvestment": "inward", "Classification": "Country"}
+    rows = [row(y, value=str(1000 + y)) for y in range(2009, 2013)]
+    run_table(FakeBEA([(outward, rows), (inward, rows)]))          # identical: one is listed under also_as
+    before = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"]
+    assert len(before) == 1 and len(before[0]["also_as"]) == 1
+    d, t = run_table(FakeBEA([(outward, rows), (inward, rows)], flaky=[outward]), use_cache=False)
+    assert "kept previous download" in t.check                     # the merged id would have been lost
+    assert json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"] == before

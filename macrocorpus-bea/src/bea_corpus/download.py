@@ -386,8 +386,11 @@ class Downloader:
         for r in records:  # a series merged into an identical one is still there, under also_as
             for alias in r.get("also_as", []):
                 new_dates.setdefault(alias["series_id"], set(r["dates"]))
-        if old and any(r.get("series_id") not in new_dates or not set(r.get("dates", [])) <= new_dates[r["series_id"]]
-                       for r in old):
+        old_dates = {}  # every id the old file had, merged ones (also_as) included
+        for r in old:
+            for sid in [r.get("series_id")] + [a.get("series_id") for a in r.get("also_as", [])]:
+                old_dates.setdefault(sid, set(r.get("dates", [])))
+        if old and any(sid not in new_dates or not dates <= new_dates[sid] for sid, dates in old_dates.items()):
             # BEA didn't answer some requests and this run is missing series, or dates of a series, that the
             # last download had. Keep the last download instead of overwriting or deleting it, and report
             # what's on disk. (If this run has every series and date the old file had, it's written as usual.)
@@ -395,7 +398,9 @@ class Downloader:
             t.empty_series = sum(1 for r in old if not r.get("n_obs"))
             t.check += " (kept previous download)"
             self.log(dataset, table, "warning", f"Kept the previous download of this table ({t.series} series): "
-                                                f"BEA didn't answer {t.unanswered} request(s) this run.")
+                                                f"BEA didn't answer {t.unanswered} request(s) this run"
+                                                + (" (or a dictionary list it needs)." if any(
+                                                    ds == dataset for ds, _ in self._dictionary_unanswered) else "."))
             return t
         if t.empty_series:
             self.log(dataset, table, "info", f"{t.empty_series} of {t.series} series have no values at all "
