@@ -428,3 +428,12 @@ def test_sample_flags():
     assert p.parse_args(["--sample"]).sample == "quick"          # the config's small test set
     assert p.parse_args(["--sample", "10"]).sample == 10
     assert p.parse_args(["--sample-size", "1000"]).sample == 1000  # old command still works
+
+
+def test_full_run_writes_shape_memory_and_report(workdir):
+    download.run(only=["MNE"], client=client())
+    report = json.loads(Path("reports/shapes_MNE.json").read_text())
+    assert set(report) == {"22", "27", "30", "31", "33", "6"}
+    assert all(r["status"] in ("data", "no data") for rows in report.values() for r in rows)
+    remembered = json.loads(Path("data/raw/cache/shapes_MNE.json").read_text())
+    assert remembered and all("checked" in e for t in remembered.values() for e in t.values())

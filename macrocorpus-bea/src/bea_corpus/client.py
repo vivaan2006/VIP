@@ -28,6 +28,32 @@ class BEAError(RuntimeError):
     """Raised when the API returns an error object instead of data."""
 
 
+class BEATransientError(BEAError):
+    """BEA didn't really answer: the connection dropped, it kept throttling us (429), it timed out or
+    was blocked (403, 408), it had a server error (5xx), it sent a page that isn't JSON, or its error
+    message says it is busy or over a limit. Unlike a normal BEAError this says nothing about whether
+    the data exists, so callers should try again later rather than treat it as "no data".
+    """
+
+
+TRANSIENT_HTTP = {403, 408, 425, 429}  # plus every 5xx
+# BEA usually answers a bad request with a JSON error at HTTP 200. These phrases mean "not now"
+# rather than "no such data", so the request is worth trying again later.
+# Kept narrow on purpose: a word like "unavailable" can also mean "no data for this selection".
+TRANSIENT_WORDS = ("too many requests", "rate limit", "requests per minute", "try again", "temporarily",
+                   "timed out", "timeout", "throttl", "server busy", "locked out")
+THROTTLE_CODE = "[7] "  # BEA's "Request Denied - exceeded Requests per minute quota."
+
+
+def is_transient(exc: Exception) -> bool:
+    """True if a failed call says nothing about whether the data exists (worth retrying later)."""
+    if isinstance(exc, (BEATransientError, requests.RequestException, ConnectionError, TimeoutError)):
+        return True
+    text = str(exc)
+    return isinstance(exc, BEAError) and (text.startswith(THROTTLE_CODE)
+                                          or any(w in text.lower() for w in TRANSIENT_WORDS))
+
+
 class BEAClient:
     def __init__(
         self,
@@ -91,11 +117,8 @@ class BEAClient:
     def _results(self, method: str, use_cache: bool = True, **params: Any) -> dict:
         query = {"method": method, "ResultFormat": "JSON", **{k: _fmt(v) for k, v in params.items()}}
         cache_file = self._cache_path(query)
-        if use_cache and not self.refresh and cache_file and cache_file.exists():
-            text = cache_file.read_text()
-            payload = json.loads(text)
-            self.last_bytes, self.last_seconds, self.last_from_cache = len(text.encode()), 0.0, True
-        else:
+        payload = self._read_cache(cache_file) if use_cache and not self.refresh else None
+        if payload is None:
             payload = self._request(query)
             self.last_from_cache = False
             # BEA echoes the request, including your UserID, back in the
@@ -108,9 +131,24 @@ class BEAClient:
                 time.sleep(self.error_pause)
                 raise
             if cache_file:
-                cache_file.write_text(json.dumps(payload))
+                tmp = cache_file.with_name(cache_file.name + ".tmp")  # never leave half a file
+                tmp.write_text(json.dumps(payload))
+                tmp.replace(cache_file)
             return results
         return extract_results(payload)
+
+    def _read_cache(self, cache_file: Path | None) -> dict | None:
+        """A saved response, or None. A damaged file (e.g. from a crash mid-write) is deleted and fetched again."""
+        if not cache_file or not cache_file.exists():
+            return None
+        try:
+            text = cache_file.read_text()
+            payload = json.loads(text)
+        except (OSError, ValueError):
+            cache_file.unlink(missing_ok=True)
+            return None
+        self.last_bytes, self.last_seconds, self.last_from_cache = len(text.encode()), 0.0, True
+        return payload
 
     def _request(self, query: dict) -> dict:
         params = {"UserID": self.api_key, **query}
@@ -127,8 +165,8 @@ class BEAClient:
                 if attempt < self.max_retries:
                     time.sleep(self.network_pause * (attempt + 1))
                     continue
-                raise BEAError(f"Network problem, gave up after {attempt + 1} tries: "
-                               f"{self._hide_key(exc)}") from None
+                raise BEATransientError(f"Network problem, gave up after {attempt + 1} tries: "
+                                        f"{self._hide_key(exc)}") from None
             self.last_seconds = time.monotonic() - started
             self.last_bytes = len(resp.content)
             self._recent.append((time.monotonic(), self.last_bytes))
@@ -138,6 +176,8 @@ class BEAClient:
             if resp.status_code >= 500 and attempt < self.max_retries:  # BEA having a bad moment
                 time.sleep(self.network_pause * (attempt + 1))
                 continue
+            if resp.status_code in TRANSIENT_HTTP or resp.status_code >= 500:
+                raise BEATransientError(f"HTTP {resp.status_code} from BEA, gave up after {attempt + 1} tries")
             if resp.status_code >= 400:
                 raise BEAError(f"HTTP {resp.status_code} from BEA")
             # BEA sends UTF-8; a few old footnotes aren't valid UTF-8, so fall back to Latin-1.
@@ -148,8 +188,8 @@ class BEAClient:
             try:
                 return json.loads(text)
             except ValueError:
-                raise BEAError(f"BEA sent something that isn't JSON: {text[:150]!r}") from None
-        raise BEAError("Gave up after repeated throttling (HTTP 429).")
+                raise BEATransientError(f"BEA sent something that isn't JSON: {text[:150]!r}") from None
+        raise AssertionError("unreachable: the last attempt always returns or raises")
 
     def _hide_key(self, exc: Exception) -> str:
         """Error text with the API key taken out (requests puts the whole URL in its messages)."""

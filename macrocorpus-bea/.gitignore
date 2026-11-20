@@ -12,3 +12,4 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 reports/run_log.txt
+reports/shapes_*.json
