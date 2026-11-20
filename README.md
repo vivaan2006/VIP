@@ -46,6 +46,8 @@ Runs IIP, MNE, IntlServTrade, FixedAssets and NIUnderlyingDetail (set in `config
 
 ## What it does
 
+Diagrams of the whole flow, plus where to look when something breaks: [docs/workflow.md](docs/workflow.md).
+
 - Uses the BEA API key to call BEA's official API. No web scraping, it's just requests that return JSON.
 - Checks BEA's list of datasets against `config/datasets.yaml`, so if BEA adds a dataset we'd see it in the issues.
 - For each of the 12 datasets, saves the **dictionary**: every parameter and every value it can take (all tables, industries, countries, etc.).
