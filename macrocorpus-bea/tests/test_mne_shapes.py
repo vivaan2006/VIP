@@ -586,3 +586,70 @@ def test_many_no_answers_in_one_table_end_with_a_total():
     d = download.Downloader(AllDown(), {"datasets": {}})
     d.download_table("Regional", {"table_param": "TableName"}, "CAINC1", "", {"TableName": "CAINC1"})
     assert any("requests for this table got no answer from BEA in total" in i.issue for i in d.issues)
+
+
+def test_extra_that_only_repeats_original_rows_does_not_take_the_id():
+    def rows(code, name):
+        return [{"Year": str(y), "SeriesID": "8", "SeriesName": "Emp", "Row": "Georgia", "RowCode": "13",
+                 "Column": name, "ColumnCode": code, "DataValue": f"{100 + y:,}", "TableScale": "Thousands"}
+                for y in range(2009, 2020)]
+    orig = {"DirectionOfInvestment": "state", "Classification": "StatebyCountryofUBO", "OwnershipLevel": "0",
+            "NonbankAffiliatesOnly": "0"}
+    extra = {**orig, "Country": "000"}
+
+    class NeedsCountry(FakeBEA):
+        def get_data(self, dataset, use_cache=True, **request):
+            if "Country" not in request:
+                raise BEAError("[40] Country required")
+            return super().get_data(dataset, use_cache, **request)
+    run_table(NeedsCountry([(orig, rows("000", "All countries") + rows("100", "Canada")),
+                            (extra, rows("000", "All countries"))]), table="8")
+    series = json.loads(Path("data/corpus/MNE/series/8.json").read_text())["series"]
+    assert [r["series_id"].split(".")[5] for r in series] == ["000"]   # same id on top as on main
+    assert [a["series_id"].split(".")[5] for a in series[0]["also_as"]] == ["100"]
+
+
+def test_series_merged_into_another_still_counts_as_there():
+    plain = {"DirectionOfInvestment": "outward", "Classification": "Country"}
+    rows = {y: row(y, value=str(1000 + y)) for y in range(2000, 2013)}
+    run_table(FakeBEA([(plain, list(rows.values())), (NEW_YEARS, [rows[y] for y in range(2009, 2013)])]))
+    flaky = {"DirectionOfInvestment": "inward", "Classification": "Country"}
+    d, t = run_table(FakeBEA([(plain, list(rows.values())), (NEW_YEARS, [rows[y] for y in range(2009, 2013)]),
+                              (OLD_YEARS, [rows[y] for y in range(2000, 2009)])], flaky=[flaky]), use_cache=False)
+    assert "kept previous download" not in t.check     # the fuller result is saved
+    series = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"]
+    assert len(series) == 1 and series[0]["also_as"]
+
+
+def test_dictionary_json_says_which_lists_were_reused():
+    path = Path("data/corpus/IntlServSTA/dictionary.json")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"values": {"AreaOrCountry": [{"Key": "China"}]}}))
+    d = download.Downloader(DictionaryDown(), {"datasets": {}})
+    d.download_dictionary("IntlServSTA")
+    assert json.loads(path.read_text())["no_answer"] == ["AreaOrCountry"]
+
+
+class YearListDown(DictionaryDown):
+    last_bytes = 10
+    def get_parameter_list(self, dataset):
+        return [{"ParameterName": "TableName"}, {"ParameterName": "Year"}]
+
+    def get_parameter_values(self, dataset, name):
+        if name == "Year":
+            raise BEATransientError("Network problem")
+        return [{"Key": "T1"}]
+
+    def get_data(self, dataset, use_cache=True, **request):
+        return {"Data": []}
+
+
+def test_empty_table_keeps_its_file_when_a_dictionary_list_got_no_answer():
+    series = Path("data/corpus/FixedAssets/series/T1.json")
+    series.parent.mkdir(parents=True)
+    series.write_text(json.dumps({"series": [{"series_id": "x", "n_obs": 2, "dates": ["2020-01-01"]}]}))
+    cfg = {"table_param": "TableName", "params": {"Year": "ALL"}}
+    d = download.Downloader(YearListDown(), {"datasets": {"FixedAssets": cfg}})
+    d.download_dictionary("FixedAssets")
+    t = d.download_table("FixedAssets", cfg, "T1", "", {"TableName": "T1", "Year": "ALL"})
+    assert series.exists() and t.unanswered == 1 and "kept previous download" in t.check

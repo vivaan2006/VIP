@@ -294,7 +294,7 @@ class Downloader:
                                              "run's list where there was one. Rerun to get a fresh one.")
         _write_json(CORPUS / dataset / "dictionary.json", {
             "dataset": dataset, "retrieved": date.today().isoformat(), "parameters": params,
-            "values": values, "could_not_list": failed})
+            "values": values, "could_not_list": failed, "no_answer": unanswered})
         return params, values
 
     # 2-4. one dataset
@@ -358,6 +358,8 @@ class Downloader:
         else:
             responses = self._whole_table(dataset, t, params)
 
+        if not responses and not t.unanswered and any(ds == dataset for ds, _ in self._dictionary_unanswered):
+            t.unanswered += 1  # a list BEA didn't answer (e.g. Year) may be why nothing came back: keep last download
         if dataset != "Regional" and cfg.get("check") and responses:
             self._check_against_dictionary(dataset, cfg, table, t, responses)
 
@@ -381,6 +383,9 @@ class Downloader:
         old = _read_dict(CORPUS / dataset / "series" / f"{safe_name(table)}.json").get("series", []) \
             if t.unanswered and series_file_exists(dataset, table) else []
         new_dates = {r["series_id"]: set(r["dates"]) for r in records}
+        for r in records:  # a series merged into an identical one is still there, under also_as
+            for alias in r.get("also_as", []):
+                new_dates.setdefault(alias["series_id"], set(r["dates"]))
         if old and any(r.get("series_id") not in new_dates or not set(r.get("dates", [])) <= new_dates[r["series_id"]]
                        for r in old):
             # BEA didn't answer some requests and this run is missing series, or dates of a series, that the

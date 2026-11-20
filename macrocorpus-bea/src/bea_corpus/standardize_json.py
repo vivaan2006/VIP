@@ -352,7 +352,7 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
         if len(definitions) > 1:
             record["definition_history"] = definitions
         if preferred is not None:  # 0: only preferred requests, 1: preferred joined with others, 2: none
-            hits = {preferred(responses[it[5]][0]) for it in items}
+            hits = {preferred(responses[chosen[d][5]][0]) for d in dates}  # the rows actually kept
             record["_rank"] = 0 if hits == {True} else 1 if True in hits else 2
         if len(units_seen) > 1:
             record["unit_history"] = [{"unit": u, "unit_multiplier": m} for u, m in units_seen]
