@@ -244,6 +244,7 @@ class Downloader:
         self._shapes_known: dict[str, dict] = {}  # remembered "no data" shapes, see _all_shapes
         self._shape_report: dict[str, dict] = {}
         self._split_values: list[str] = []
+        self._dictionary_unanswered: set[tuple[str, str]] = set()  # (dataset, parameter) with no list at all
         self._years: list[str] = []
 
     def log(self, dataset: str, table: str, level: str, issue: str) -> None:
@@ -268,17 +269,29 @@ class Downloader:
     # 1. dictionary
     def download_dictionary(self, dataset: str) -> tuple[list[dict], dict[str, list]]:
         params = self.client.get_parameter_list(dataset)
+        old = _read_dict(CORPUS / dataset / "dictionary.json").get("values", {})
         values: dict[str, list] = {}
         failed: dict[str, str] = {}
+        unanswered: list[str] = []
         for p in params:
             name = p.get("ParameterName", "").strip()
             try:
                 values[name] = as_list(self.client.get_parameter_values(dataset, name))
             except BEAError as exc:
-                failed[name] = str(exc)
+                if not is_transient(exc):
+                    failed[name] = str(exc)
+                elif old.get(name):  # BEA didn't answer: last run's list is better than none
+                    values[name] = old[name]
+                    unanswered.append(name)
+                else:
+                    unanswered.append(name)
+                    self._dictionary_unanswered.add((dataset, name))
         if failed:
             self.log(dataset, "", "info", f"BEA can't list values for parameter(s) {', '.join(failed)} "
                                           "on their own (they depend on the table).")
+        if unanswered:
+            self.log(dataset, "", "warning", f"BEA didn't answer for the list of {', '.join(unanswered)}; used last "
+                                             "run's list where there was one. Rerun to get a fresh one.")
         _write_json(CORPUS / dataset / "dictionary.json", {
             "dataset": dataset, "retrieved": date.today().isoformat(), "parameters": params,
             "values": values, "could_not_list": failed})
@@ -331,7 +344,14 @@ class Downloader:
         if dataset == "Regional":
             responses = self._regional_table(t, params)
         elif cfg.get("split_by"):
-            responses = self._split(dataset, t, params, cfg["split_by"], self._split_values)
+            if not self._split_values and (dataset, cfg["split_by"]) in self._dictionary_unanswered:
+                t.unanswered += 1  # no list of values to split by, because BEA didn't answer: keep last download
+                t.unanswered_summed_up = True
+                self.log(dataset, table, "error", f"No list of {cfg['split_by']} values to ask for (BEA didn't "
+                                                  "answer); rerun to try again.")
+                responses = []
+            else:
+                responses = self._split(dataset, t, params, cfg["split_by"], self._split_values)
         elif cfg.get("request_shapes"):
             responses = self._all_shapes(dataset, t, params, cfg["request_shapes"] + cfg.get("extra_request_shapes", []),
                                          discontinued=parse_ids(cfg.get("discontinued", "")))
@@ -360,10 +380,12 @@ class Downloader:
                                                 "in total; rerun to try them again.")
         old = _read_dict(CORPUS / dataset / "series" / f"{safe_name(table)}.json").get("series", []) \
             if t.unanswered and series_file_exists(dataset, table) else []
-        if old and not {r.get("series_id") for r in old} <= {r["series_id"] for r in records}:
-            # BEA didn't answer some requests and this run is missing series the last download had. Keep the
-            # last download instead of overwriting or deleting it, and report what's on disk. (If this run has
-            # every series the old file had, it's written as usual: it can only be more complete.)
+        new_dates = {r["series_id"]: set(r["dates"]) for r in records}
+        if old and any(r.get("series_id") not in new_dates or not set(r.get("dates", [])) <= new_dates[r["series_id"]]
+                       for r in old):
+            # BEA didn't answer some requests and this run is missing series, or dates of a series, that the
+            # last download had. Keep the last download instead of overwriting or deleting it, and report
+            # what's on disk. (If this run has every series and date the old file had, it's written as usual.)
             t.series, t.observations = len(old), sum(r.get("n_obs", 0) for r in old)
             t.empty_series = sum(1 for r in old if not r.get("n_obs"))
             t.check += " (kept previous download)"
@@ -450,7 +472,7 @@ class Downloader:
         """The whole table in one call. If BEA sends it back empty or refuses it, ask in smaller pieces:
         one frequency at a time, then ten years at a time. (NIUnderlyingDetail U20403-U20405 come back
         empty for Frequency=A,Q,M but have data one frequency at a time.)"""
-        got = self._get(dataset, t, params, probe=True)
+        got = self._get(dataset, t, params, probe=True, log_transient=False)  # reported below if it matters
         if _has_rows(got):
             return [got]
         first_problem = self._last_error or "came back empty"

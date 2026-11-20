@@ -156,6 +156,7 @@ def test_damaged_cache_file_is_fetched_again(monkeypatch, tmp_path):
 def test_bea_throttle_code_is_no_answer():
     from bea_corpus.client import BEAError, is_transient
     assert is_transient(BEAError("[7] Request Denied - exceeded Requests per minute quota."))
+    assert is_transient(BEAError("[7] Request Denied"))                 # the code alone is enough
     assert not is_transient(BEAError("[1] no data found"))
     assert not is_transient(BEAError("[40] The dataset requested requires parameters that were missing"))
 

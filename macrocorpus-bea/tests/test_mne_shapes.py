@@ -191,22 +191,27 @@ def test_memory_survives_an_interrupted_run(monkeypatch):
     assert len(memory("4")) == 71                     # the finished table is still remembered
 
 
-def test_memory_depends_on_the_whole_request_and_expires():
+def test_memory_depends_on_the_whole_request():
     fake = FakeBEA([(NEW_YEARS, [row(2010)])])
     run_table(fake)
     fake.calls.clear()
     run_table(fake, base={"Country": "650", "Year": "2015"})     # different request: nothing is skipped
     assert len(fake.calls) == 72
 
-    old = (date.today() - timedelta(days=download.SHAPE_MEMORY_DAYS + 1)).isoformat()
+
+def test_remembered_refusals_expire():
+    fake = FakeBEA([(NEW_YEARS, [row(2010)])])
+    run_table(fake)
     path = download.shape_memory_path("MNE")
     data = json.loads(path.read_text())
-    for entry in data["4"].values():
-        entry["checked"] = old
+    keys = list(data["4"])
+    old = (date.today() - timedelta(days=download.SHAPE_MEMORY_DAYS + 1)).isoformat()
+    for key in keys[:10]:
+        data["4"][key]["checked"] = old                   # 10 expired, the other 61 still fresh
     path.write_text(json.dumps(data))
     fake.calls.clear()
     run_table(fake)
-    assert len(fake.calls) == 72                       # expired refusals are asked again
+    assert len(fake.calls) == 1 + 10                     # the data shape + the 10 expired ones
 
 
 def test_refresh_tries_everything_and_forgets_shapes_that_now_work():
@@ -404,6 +409,7 @@ def test_whole_table_no_answer_covered_by_smaller_requests_is_complete():
     d = download.Downloader(WholeTableBusy(), {"datasets": {}})
     t = d.download_table("NIPA", {"table_param": "TableName"}, "T1", "", {"TableName": "T1", "Frequency": "A,Q"})
     assert t.series == 2 and t.unanswered == 0 and download._status_word(t) == "ok"
+    assert [i.level for i in d.issues] == ["info"] and "rerun" not in d.issues[0].issue   # just a note
 
 
 def test_one_by_one_no_answer_is_not_no_data():
@@ -507,3 +513,76 @@ def test_no_answer_when_checking_against_the_dictionary_is_not_info():
     d._check_against_dictionary("ITA", {"check": "AreaOrCountry", "table_param": "Indicator"}, "BalGds", t,
                                 [({}, {"Data": [{"AreaOrCountry": "China"}]})])
     assert t.unanswered == 1 and [i.level for i in d.issues] == ["warning"]
+
+
+# ---------- second final review ----------
+
+def test_older_years_that_got_no_answer_are_not_overwritten():
+    run_table(FakeBEA([(OLD_YEARS, [row(y) for y in range(2000, 2009)]),
+                       (NEW_YEARS, [row(y) for y in range(2009, 2013)])]))
+    d, t = run_table(FakeBEA([(NEW_YEARS, [row(y) for y in range(2009, 2013)])], flaky=[OLD_YEARS]),
+                     use_cache=False)
+    s = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"][0]
+    assert s["start"] == "2000-01-01" and "kept previous download" in t.check
+
+
+def test_a_series_made_only_of_original_shapes_keeps_its_id_first():
+    plain = {"DirectionOfInvestment": "outward", "Classification": "Country"}       # original, all years
+    rows = {y: row(y, value=str(1000 + y)) for y in range(2000, 2013)}
+    fake = FakeBEA([(plain, list(rows.values())),
+                    (NEW_YEARS, [rows[y] for y in range(2009, 2013)]),                  # original, newer years
+                    (OLD_YEARS, [rows[y] for y in range(2000, 2009)])])                 # extra, older years
+    run_table(fake)
+    series = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"]
+    assert len(series) == 1 and series[0]["series_id"].endswith(".outward.Country.A")
+    assert series[0]["also_as"][0]["series_id"].endswith(".outward.Country.0.A")
+
+
+def test_original_joined_with_older_years_beats_a_pure_extra():
+    extra = {"DirectionOfInvestment": "outward", "Classification": "IndustryByCountry", "OwnershipLevel": "0",
+             "NonbankAffiliatesOnly": "0"}
+    rows = {y: row(y, value=str(1000 + y)) for y in range(2000, 2013)}
+    fake = FakeBEA([(NEW_YEARS, [rows[y] for y in range(2009, 2013)]), (OLD_YEARS, [rows[y] for y in range(2000, 2009)]),
+                    (extra, list(rows.values()))])
+    run_table(fake)
+    series = json.loads(Path("data/corpus/MNE/series/4.json").read_text())["series"]
+    assert len(series) == 1 and ".outward.Country.0." in series[0]["series_id"]
+
+
+class DictionaryDown:
+    """BEA answers the parameter list but not the list of values for a parameter."""
+
+    def get_parameter_list(self, dataset):
+        return [{"ParameterName": "Channel"}, {"ParameterName": "AreaOrCountry"}]
+
+    def get_parameter_values(self, dataset, name):
+        if name == "AreaOrCountry":
+            raise BEATransientError("Network problem")
+        return [{"Key": "Mofas"}]
+
+
+def test_dictionary_no_answer_reuses_last_runs_list():
+    path = Path("data/corpus/IntlServSTA/dictionary.json")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"values": {"AreaOrCountry": [{"Key": "China"}]}}))
+    d = download.Downloader(DictionaryDown(), {"datasets": {}})
+    params, values = d.download_dictionary("IntlServSTA")
+    assert values["AreaOrCountry"] == [{"Key": "China"}] and [i.level for i in d.issues] == ["warning"]
+
+
+def test_dictionary_no_answer_with_no_old_list_keeps_the_table():
+    series = Path("data/corpus/IntlServSTA/series/Mofas.json")
+    series.parent.mkdir(parents=True)
+    series.write_text(json.dumps({"series": [{"series_id": "x", "n_obs": 2, "dates": ["2020-01-01"]}]}))
+    cfg = {"table_param": "Channel", "split_by": "AreaOrCountry"}
+    d = download.Downloader(DictionaryDown(), {"datasets": {"IntlServSTA": cfg}})
+    d.download_dictionary("IntlServSTA")
+    d._split_values = []
+    t = d.download_table("IntlServSTA", cfg, "Mofas", "", {"Channel": "Mofas"})
+    assert series.exists() and t.unanswered == 1 and "kept previous download" in t.check
+
+
+def test_many_no_answers_in_one_table_end_with_a_total():
+    d = download.Downloader(AllDown(), {"datasets": {}})
+    d.download_table("Regional", {"table_param": "TableName"}, "CAINC1", "", {"TableName": "CAINC1"})
+    assert any("requests for this table got no answer from BEA in total" in i.issue for i in d.issues)

@@ -179,8 +179,9 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
         mixes values, every change is listed in `definition_history`, with the dates each value covers.
         If two settings both have a date, the one from the earlier request is kept for that date.
       - `preferred(request)`: when identical numbers come back under several breakdowns (merge_identical),
-        a series from a preferred request keeps its id over one that isn't (MNE: the original shapes
-        win over shapes added later, so adding shapes never changes an existing id).
+        the id kept on top is, in order: a series made only from preferred requests, one where preferred
+        requests were joined with others, one with no preferred request. (MNE: the original shapes win
+        over shapes added later, so an added shape never takes an existing series' id.)
       - two rows with the same codes, labels and date: equal numbers are a harmless repeat;
         different numbers are a conflict. The first is kept and the conflict is counted, never hidden.
 
@@ -350,8 +351,9 @@ def table_to_series(responses: list[tuple[dict, dict]], dataset: str, table: str
             record["label_history"] = history
         if len(definitions) > 1:
             record["definition_history"] = definitions
-        if preferred is not None:
-            record["_rank"] = 0 if any(preferred(responses[it[5]][0]) for it in items) else 1
+        if preferred is not None:  # 0: only preferred requests, 1: preferred joined with others, 2: none
+            hits = {preferred(responses[it[5]][0]) for it in items}
+            record["_rank"] = 0 if hits == {True} else 1 if True in hits else 2
         if len(units_seen) > 1:
             record["unit_history"] = [{"unit": u, "unit_multiplier": m} for u, m in units_seen]
         records.append(record)
